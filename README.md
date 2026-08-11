@@ -143,7 +143,7 @@ This script uses two models to perform more advanced logic:
 - Use the identity classifier to decide which cat is in the toilet.
 - After the cat leaves, use the occupancy classifier to determine whether the toilet is empty or non-empty.
 - Save event images under [toilet_events](toilet_events).
-- Send a notification with `after_2s.jpg` attached when a complete toilet event is detected.
+- Send a notification with `cat.jpg` and `after_2s.jpg` attached when a complete toilet event is detected.
 
 Notification settings are configured in [configs/config.yaml](configs/config.yaml) under the `notification` section. The project supports two modes:
 
@@ -237,7 +237,7 @@ In practice, the script behaves like this:
 - Trained model weights are stored under `models/cat_classifier/identity` and `models/cat_classifier/occupancy`.
 - Previous or historical training results can be viewed under [models](models).
 - The monitoring script creates event folders organized by date and time under [toilet_events](toilet_events).
-- Each event directory may contain files such as `exit.jpg` and `after_2s.jpg`.
+- Each event directory may contain files such as `cat.jpg` and `after_2s.jpg`.
 
 ## Notes and Considerations
 

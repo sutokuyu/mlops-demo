@@ -55,23 +55,24 @@ DISCORD_CONTENT_TEMPLATE = DISCORD_CONFIG.get(
 )
 
 
-def _build_message(cat_name: str, attachment_path: Path) -> EmailMessage:
+def _build_message(cat_name: str, attachment_paths: list[Path]) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = SUBJECT_TEMPLATE.format(cat_name=cat_name)
     message["From"] = FROM_EMAIL or SMTP_USERNAME or "no-reply@example.com"
     message["To"] = ", ".join(RECIPIENTS)
-    message.set_content(BODY_TEMPLATE.format(cat_name=cat_name, attachment=str(attachment_path)))
+    message.set_content(BODY_TEMPLATE.format(cat_name=cat_name))
 
-    with open(attachment_path, "rb") as handle:
-        data = handle.read()
-        maintype = "image"
-        subtype = attachment_path.suffix.lstrip(".").lower() or "jpeg"
-        message.add_attachment(
-            data,
-            maintype=maintype,
-            subtype=subtype,
-            filename=attachment_path.name,
-        )
+    for attachment_path in attachment_paths:
+        with open(attachment_path, "rb") as handle:
+            data = handle.read()
+            maintype = "image"
+            subtype = attachment_path.suffix.lstrip(".").lower() or "jpeg"
+            message.add_attachment(
+                data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=attachment_path.name,
+            )
 
     return message
 
@@ -84,12 +85,9 @@ def _build_discord_payload(cat_name: str) -> dict[str, str]:
     }
 
 
-def _send_discord_notification(cat_name: str, attachment_path: Path) -> None:
+def _send_discord_notification(cat_name: str, attachment_paths: list[Path]) -> None:
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Discord webhook URL is not configured for notifications.")
-
-    with open(attachment_path, "rb") as handle:
-        file_data = handle.read()
 
     content = _build_discord_payload(cat_name)
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
@@ -105,20 +103,28 @@ def _send_discord_notification(cat_name: str, attachment_path: Path) -> None:
             "\r\n"
         )
 
-    mimetype, _ = mimetypes.guess_type(attachment_path.name)
-    if mimetype is None:
-        mimetype = "application/octet-stream"
+    body = b"".join(part.encode("utf-8") for part in parts)
 
-    parts.append(
-        f"--{boundary}"
-        "\r\n"
-        f"Content-Disposition: form-data; name=\"file\"; filename=\"{attachment_path.name}\""
-        "\r\n"
-        f"Content-Type: {mimetype}"
-        "\r\n\r\n"
-    )
+    for attachment_path in attachment_paths:
+        with open(attachment_path, "rb") as handle:
+            file_data = handle.read()
 
-    body = "".join(parts).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        mimetype, _ = mimetypes.guess_type(attachment_path.name)
+        if mimetype is None:
+            mimetype = "application/octet-stream"
+
+        file_part = (
+            f"--{boundary}"
+            "\r\n"
+            f"Content-Disposition: form-data; name=\"file\"; filename=\"{attachment_path.name}\""
+            "\r\n"
+            f"Content-Type: {mimetype}"
+            "\r\n\r\n"
+        ).encode("utf-8")
+
+        body += file_part + file_data + b"\r\n"
+
+    body += f"--{boundary}--\r\n".encode("utf-8")
 
     request = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
@@ -138,14 +144,18 @@ def _send_discord_notification(cat_name: str, attachment_path: Path) -> None:
     print("✅ Discord notification sent")
 
 
-def send_notification(cat_name: str, attachment_path: str) -> None:
-    attachment = Path(attachment_path)
-    if not attachment.exists():
-        raise FileNotFoundError(f"Notification attachment not found: {attachment}")
+def send_notification(cat_name: str, attachment_paths: list[str] | str) -> None:
+    if isinstance(attachment_paths, (str, Path)):
+        attachment_paths = [attachment_paths]
+
+    attachments = [Path(path) for path in attachment_paths]
+    for attachment in attachments:
+        if not attachment.exists():
+            raise FileNotFoundError(f"Notification attachment not found: {attachment}")
 
     if MODE == "discord":
         print(f"📧 Sending Discord notification via webhook: {DISCORD_WEBHOOK_URL}")
-        _send_discord_notification(cat_name, attachment)
+        _send_discord_notification(cat_name, attachments)
         return
 
     if not RECIPIENTS:
@@ -155,7 +165,7 @@ def send_notification(cat_name: str, attachment_path: str) -> None:
     if not SMTP_SERVER:
         raise RuntimeError("SMTP server is not configured for notifications.")
 
-    message = _build_message(cat_name, attachment)
+    message = _build_message(cat_name, attachments)
 
     print(f"📧 Sending mail notification to: {RECIPIENTS}")
 

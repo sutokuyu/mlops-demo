@@ -244,7 +244,8 @@ sample_save_time = None
 
 current_event_dir = None
 
-last_frame = None
+best_cat_crop = None
+best_cat_conf = 0.0
 
 
 # ============================================================
@@ -257,7 +258,6 @@ def get_class_id(names, class_name):
     for class_id, name in names.items():
 
         if name == class_name:
-
             return class_id
 
     return None
@@ -579,6 +579,8 @@ try:
 
                     identity_samples = 0
 
+                    best_cat_crop = None
+                    best_cat_conf = 0.0
 
                     # Reset empty
                     empty_confirm_start = None
@@ -657,6 +659,20 @@ try:
 
                 empty_confirm_start = None
 
+                if (
+                    cat_box is not None
+                    and detection_conf > best_cat_conf
+                ):
+                    x1, y1, x2, y2 = cat_box
+                    h, w = frame.shape[:2]
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(w, x2)
+                    y2 = min(h, y2)
+                    cat_crop = frame[y1:y2, x1:x2]
+                    if cat_crop.size > 0:
+                        best_cat_conf = detection_conf
+                        best_cat_crop = cat_crop.copy()
 
                 # --------------------------------------------
                 # identity:
@@ -882,42 +898,33 @@ try:
                                     event_name
                                 )
 
-
                                 current_event_dir.mkdir(
                                     parents=True,
                                     exist_ok=True
                                 )
 
-
                                 # ---------------------------------
-                                # Save exit image
+                                # Save the highest-confidence cat image
                                 # ---------------------------------
 
-                                exit_image_path = (
-                                    current_event_dir
-                                    /
-                                    "exit.jpg"
-                                )
-
-
-                                cv2.imwrite(
-                                    str(
-                                        exit_image_path
-                                    ),
-                                    last_frame
-                                )
-
-
-                                print(
-                                    "📸 Exit image saved: "
-                                    f"{exit_image_path}"
-                                )
-
-
-                                # ---------------------------------
-                                # Wait 2 seconds before taking
-                                # the poop/pee sample.
-                                # ---------------------------------
+                                if best_cat_crop is not None:
+                                    cat_image_path = (
+                                        current_event_dir
+                                        /
+                                        "cat.jpg"
+                                    )
+                                    cv2.imwrite(
+                                        str(cat_image_path),
+                                        best_cat_crop
+                                    )
+                                    print(
+                                        "📸 Cat image saved: "
+                                        f"{cat_image_path}"
+                                    )
+                                else:
+                                    print(
+                                        "⚠️ No cat image available for this event"
+                                    )
 
                                 sample_save_time = (
                                     now
@@ -980,6 +987,10 @@ try:
                 ):
 
 
+                    cat_image_path = None
+                    if best_cat_crop is not None:
+                        cat_image_path = current_event_dir / "cat.jpg"
+
                     sample_path = (
                         current_event_dir
                         /
@@ -1003,10 +1014,19 @@ try:
                         is not None
                         and current_event_dir is not None
                     ):
+                        attachment_paths = []
+                        if cat_image_path is not None:
+                            attachment_paths.append(
+                                str(cat_image_path)
+                            )
+                        attachment_paths.append(
+                            str(sample_path)
+                        )
+
                         try:
                             notification_callback(
                                 cat_name,
-                                str(sample_path)
+                                attachment_paths
                             )
                         except Exception as exc:
                             print(
