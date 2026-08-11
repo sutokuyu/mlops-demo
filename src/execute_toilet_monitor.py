@@ -1,4 +1,5 @@
 import sys
+import runpy
 from pathlib import Path
 
 
@@ -14,14 +15,10 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.monitoring.toilet_monitor import main as run_monitor, register_notification_callback
-from src.notification.notification_controller import send_notification
-
 
 def main():
     print("Starting toilet monitor...")
-    register_notification_callback(send_notification)
-    run_monitor()
+    runpy.run_module("src.monitoring.toilet_monitor", run_name="__main__")
 
 
 if __name__ == "__main__":

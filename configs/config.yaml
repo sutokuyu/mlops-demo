@@ -50,15 +50,15 @@ training:
   exist_ok: false
 
 monitoring:
-  detection_confidence: 0.50
+  detection_confidence: 0.40
   interval_seconds: 0.5
-  enter_window_seconds: 3.0
-  enter_min_detections: 2
-  no_cat_seconds: 1.5
+  enter_window_seconds: 2.0
+  enter_min_detections: 1
+  no_cat_seconds: 2.0
   unknown_identity_label: UNKNOWN
 
 notification:
-  mode: mail
+  mode: discord
   mail:
     recipients:
       - example@example.com

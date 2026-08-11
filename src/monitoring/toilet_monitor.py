@@ -115,6 +115,14 @@ def register_notification_callback(callback):
     notification_callback = callback
 
 
+try:
+    from src.notification.notification_controller import send_notification as _send_notification
+    register_notification_callback(_send_notification)
+    print("🔔 Notification callback registered")
+except Exception as exc:
+    print(f"⚠️ Notification callback not registered: {exc}")
+
+
 # ============================================================
 # Load models
 # ============================================================

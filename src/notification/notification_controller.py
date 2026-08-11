@@ -91,21 +91,20 @@ def _send_discord_notification(cat_name: str, attachment_paths: list[Path]) -> N
 
     content = _build_discord_payload(cat_name)
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
-    parts = []
 
-    for key, value in content.items():
-        parts.append(
-            f"--{boundary}"
-            "\r\n"
-            f"Content-Disposition: form-data; name=\"{key}\""
-            "\r\n\r\n"
-            f"{value}"
-            "\r\n"
-        )
+    # Discord expects payload_json plus distinct file fields (files[0], files[1], ...).
+    payload_part = (
+        f"--{boundary}"
+        "\r\n"
+        "Content-Disposition: form-data; name=\"payload_json\""
+        "\r\n\r\n"
+        f"{json.dumps(content)}"
+        "\r\n"
+    ).encode("utf-8")
 
-    body = b"".join(part.encode("utf-8") for part in parts)
+    body = payload_part
 
-    for attachment_path in attachment_paths:
+    for index, attachment_path in enumerate(attachment_paths):
         with open(attachment_path, "rb") as handle:
             file_data = handle.read()
 
@@ -116,7 +115,7 @@ def _send_discord_notification(cat_name: str, attachment_paths: list[Path]) -> N
         file_part = (
             f"--{boundary}"
             "\r\n"
-            f"Content-Disposition: form-data; name=\"file\"; filename=\"{attachment_path.name}\""
+            f"Content-Disposition: form-data; name=\"files[{index}]\"; filename=\"{attachment_path.name}\""
             "\r\n"
             f"Content-Type: {mimetype}"
             "\r\n\r\n"
