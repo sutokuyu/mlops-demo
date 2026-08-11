@@ -1,0 +1,78 @@
+project:
+  name: mlops-cat-demo
+  root: .
+
+paths:
+  pictures: dataset/pictures
+  videos: dataset/video
+  processed: dataset/processed
+  models_root: models/cat_classifier
+  outputs: toilet_events
+  temp_training_data: tmp_training_data
+
+models:
+  detection_model: yolo11n.pt
+  classification_model: yolo11n-cls.pt
+  identity_model_path: models/cat_classifier/identity/weights/best.pt
+  occupancy_model_path: models/cat_classifier/occupancy/weights/best.pt
+
+camera:
+  rtsp_url: rtsp://<username>:<password>@<ip>:<port>/h264/ch1/main/av_stream
+
+cats:
+  detection_class: cat
+  identity_classes:
+    - cat_a
+    - cat_b
+  identity_unknown_label: UNKNOWN
+  occupancy_empty_class: empty
+  occupancy_classes:
+    - empty
+    - non-empty
+
+collect:
+  confidence_threshold: 0.70
+  save_interval_seconds: 0.5
+  min_box_width: 80
+  min_box_height: 80
+  padding: 20
+
+split:
+  val_ratio: 0.2
+  random_seed: 42
+
+training:
+  epochs: 50
+  imgsz: 224
+  batch: 16
+  device: 0
+  project_dir: models/cat_classifier
+  exist_ok: false
+
+monitoring:
+  detection_confidence: 0.50
+  interval_seconds: 0.5
+  enter_window_seconds: 3.0
+  enter_min_detections: 2
+  no_cat_seconds: 1.5
+  unknown_identity_label: UNKNOWN
+
+notification:
+  mode: mail
+  mail:
+    recipients:
+      - example@example.com
+    smtp_server: smtp.example.com
+    smtp_port: 587
+    smtp_username: user@example.com
+    smtp_password: secret
+    from_email: user@example.com
+    use_tls: true
+    use_ssl: false
+    subject_template: "{cat_name} used the toilet"
+    body_template: "A cat used the toilet. See attached image for this event."
+  discord:
+    webhook_url: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
+    username: "Toilet Monitor"
+    avatar_url: ""
+    content_template: "{cat_name} used the toilet"

@@ -1,8 +1,14 @@
 .venv/
 __pycache__/
+.vscode/
+
+/data/
+/models/
+/dataset/
+/toilet_events/
+
+*.cache
+*.pt
 *.pyc
 
-runs/
-models/
-
-.vscode/
+my_config.yaml
