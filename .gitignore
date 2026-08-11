@@ -2,13 +2,7 @@
 __pycache__/
 .vscode/
 
-/data/
-/models/
-/dataset/
 /toilet_events/
 
 *.cache
-*.pt
 *.pyc
-
-my_config.yaml
