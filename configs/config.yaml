@@ -17,13 +17,13 @@ models:
   occupancy_model_path: models/cat_classifier/occupancy/weights/best.pt
 
 camera:
-  rtsp_url: rtsp://<username>:<password>@<ip>:<port>/h264/ch1/main/av_stream
+  rtsp_url: rtsp://admin:PMEHXW@192.168.3.30:554/h264/ch1/main/av_stream
 
 cats:
   detection_class: cat
   identity_classes:
-    - cat_a
-    - cat_b
+    - bagel
+    - kurumi
   identity_unknown_label: UNKNOWN
   occupancy_empty_class: empty
   occupancy_classes:
@@ -50,11 +50,11 @@ training:
   exist_ok: false
 
 monitoring:
-  detection_confidence: 0.40
+  detection_confidence: 0.50
   interval_seconds: 0.5
-  enter_window_seconds: 2.0
-  enter_min_detections: 1
-  no_cat_seconds: 2.0
+  enter_window_seconds: 3.0
+  enter_min_detections: 2
+  no_cat_seconds: 1.5
   unknown_identity_label: UNKNOWN
 
 notification:
@@ -72,7 +72,7 @@ notification:
     subject_template: "{cat_name} used the toilet"
     body_template: "A cat used the toilet. See attached image for this event."
   discord:
-    webhook_url: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
+    webhook_url: https://discord.com/api/webhooks/1536752379490213948/VpZ3EN9zubplS8V5FsoijvfZKK6ULStmMhZ1kCBfALXa12-b3O0hcndf_YtUDAUfH8hG
     username: "Toilet Monitor"
     avatar_url: ""
     content_template: "{cat_name} used the toilet"

@@ -28,16 +28,20 @@ from src.config_loader import load_config, resolve_config_path
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 
-# YOLO detection model
-DETECTION_MODEL = CONFIG["models"]["detection_model"]
-
-IDENTITY_MODEL = resolve_config_path(CONFIG["models"]["identity_model_path"])
+# YOLO identity detection model: this should be a fine-tuned detector that sees
+# the actual observed partial-cat classes directly (e.g. bagel / kurumi).
+GENERIC_DETECTION_MODEL = CONFIG["models"]["detection_model"]
+IDENTITY_DETECTION_MODEL = resolve_config_path(CONFIG["models"]["identity_model_path"])
 OCCUPANCY_MODEL = resolve_config_path(CONFIG["models"]["occupancy_model_path"])
 
-if not IDENTITY_MODEL.exists():
-    raise RuntimeError(
-        f"Identity model not found: {IDENTITY_MODEL}"
+if IDENTITY_DETECTION_MODEL.exists():
+    DETECTION_MODEL = IDENTITY_DETECTION_MODEL
+else:
+    print(
+        "⚠️ Identity detection model not found; falling back to the generic YOLO model: "
+        f"{GENERIC_DETECTION_MODEL}"
     )
+    DETECTION_MODEL = resolve_config_path(GENERIC_DETECTION_MODEL)
 
 if not OCCUPANCY_MODEL.exists():
     raise RuntimeError(
@@ -127,22 +131,14 @@ except Exception as exc:
 # Load models
 # ============================================================
 
-print("Loading YOLO detection model...")
+print("Loading identity detection model...")
 
 detection_model = YOLO(
-    DETECTION_MODEL
+    str(DETECTION_MODEL)
 )
 
-
-print("Loading identity classifier...")
-
-identity_model = YOLO(
-    str(IDENTITY_MODEL)
-)
-
-print("Identity classes:")
-print(identity_model.names)
-
+print("Detected identity classes:")
+print(detection_model.names)
 
 print()
 print("Loading occupancy classifier...")
@@ -161,12 +157,12 @@ print()
 # Validate model classes
 # ============================================================
 
-identity_names = set(identity_model.names.values())
+identity_names = set(detection_model.names.values())
 if not set(IDENTITY_CLASSES).issubset(identity_names):
     raise RuntimeError(
-        "❌ identity model must contain "
+        "❌ identity detection model must contain "
         f"{IDENTITY_CLASSES}. "
-        f"Current classes: {identity_model.names}"
+        f"Current classes: {detection_model.names}"
     )
 
 occupancy_names = set(occupancy_model.names.values())
@@ -281,6 +277,11 @@ def get_class_id(names, class_name):
 # ============================================================
 
 def detect_cat(frame):
+    """Directly detect the observed cat identity classes, e.g. bagel / kurumi.
+
+    This bypasses the generic "cat" detector and matches the real training data,
+    which is made of partial cat crops instead of full cats.
+    """
 
     results = detection_model(
         frame,
@@ -291,129 +292,29 @@ def detect_cat(frame):
     result = results[0]
 
     if result.boxes is None:
-
-        return (
-            False,
-            None,
-            0.0
-        )
-
+        return (False, None, 0.0, None)
 
     best_box = None
-
     best_conf = 0.0
-
+    best_class = None
 
     for box in result.boxes:
+        cls_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+        class_name = result.names.get(cls_id, str(cls_id))
 
-        cls_id = int(
-            box.cls[0]
-        )
-
-        confidence = float(
-            box.conf[0]
-        )
-
-        class_name = (
-            result.names[cls_id]
-        )
-
-
-        if class_name.lower() != "cat":
-
+        if class_name not in IDENTITY_CLASSES:
             continue
 
-
         if confidence > best_conf:
-
             best_conf = confidence
-
-            best_box = (
-                box.xyxy[0]
-                .cpu()
-                .numpy()
-                .astype(int)
-            )
-
+            best_class = class_name
+            best_box = box.xyxy[0].cpu().numpy().astype(int)
 
     if best_box is None:
+        return (False, None, 0.0, None)
 
-        return (
-            False,
-            None,
-            0.0
-        )
-
-
-    return (
-        True,
-        best_box,
-        best_conf
-    )
-
-
-# ============================================================
-# identity classifier
-#
-# Input:
-#   entire frame + YOLO cat bounding box
-#
-# Output:
-#   identity
-#   class probabilities for each identity
-# ============================================================
-
-def classify_identity(frame, box):
-
-    x1, y1, x2, y2 = box
-
-    h, w = frame.shape[:2]
-
-
-    # --------------------------------------------
-    # Clamp bounding box
-    # --------------------------------------------
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(w, x2)
-    y2 = min(h, y2)
-
-    # --------------------------------------------
-    # Crop cat
-    # --------------------------------------------
-
-    crop = frame[y1:y2, x1:x2]
-
-    if crop.size == 0:
-        return None, {}
-
-    # --------------------------------------------
-    # identity inference
-    # --------------------------------------------
-
-    results = identity_model(crop, verbose=False)
-    result = results[0]
-
-    # --------------------------------------------
-    # Probabilities
-    # --------------------------------------------
-
-    probs = result.probs.data.cpu().numpy()
-    names = result.names
-
-    class_probs = {}
-    for class_name in IDENTITY_CLASSES:
-        class_id = get_class_id(names, class_name)
-        if class_id is None:
-            raise RuntimeError(
-                f"identity model does not contain {class_name}"
-            )
-        class_probs[class_name] = float(probs[class_id])
-
-    identity = max(class_probs, key=class_probs.get).upper()
-
-    return identity, class_probs
+    return (True, best_box, best_conf, best_class)
 
 
 # ============================================================
@@ -508,7 +409,8 @@ try:
         (
             has_cat,
             cat_box,
-            detection_conf
+            detection_conf,
+            detected_class
         ) = detect_cat(frame)
 
 
@@ -653,24 +555,15 @@ try:
 
         elif state == "OCCUPIED":
 
-
             # =================================================
-            # CAT DETECTED
+            # Identity detection while the cat is inside
             # =================================================
 
             if has_cat:
-
                 last_cat_detected_time = now
-
-                # Cat detected again,
-                # therefore cancel possible exit.
-
                 empty_confirm_start = None
 
-                if (
-                    cat_box is not None
-                    and detection_conf > best_cat_conf
-                ):
+                if cat_box is not None and detection_conf > best_cat_conf:
                     x1, y1, x2, y2 = cat_box
                     h, w = frame.shape[:2]
                     x1 = max(0, x1)
@@ -682,292 +575,103 @@ try:
                         best_cat_conf = detection_conf
                         best_cat_crop = cat_crop.copy()
 
-                # --------------------------------------------
-                # identity:
-                # Determine identity
-                # --------------------------------------------
-
-                identity, class_probs = classify_identity(
-                    frame,
-                    cat_box
-                )
-
+                identity = detected_class
                 if identity is not None:
                     identity_samples += 1
+                    identity_scores[identity] = identity_scores.get(identity, 0.0) + detection_conf
 
-                    for class_name, score in class_probs.items():
-                        identity_scores[class_name] += score
-
-                    average_scores = {
-                        class_name: identity_scores[class_name] / identity_samples
-                        for class_name in IDENTITY_CLASSES
-                    }
-
-                    confidence = max(average_scores.values())
-
-                    print(
-                        f"🐱 {identity} "
-                        f"det={detection_conf:.2f} "
-                        f"confidence={confidence:.2f} "
-                        + "  ".join(
-                            f"{class_name.capitalize()}={average_scores[class_name]:.2f}"
-                            for class_name in IDENTITY_CLASSES
-                        )
-                    )
-
-
-            # =================================================
-            # NO CAT DETECTED
-            # =================================================
-
-            else:
+                average_scores = {
+                    class_name: identity_scores.get(class_name, 0.0) / identity_samples
+                    if identity_samples > 0 else 0.0
+                    for class_name in IDENTITY_CLASSES
+                }
+                confidence = max(average_scores.values(), default=0.0)
 
                 print(
-                    "⬜ No cat"
-                )
-
-
-                # --------------------------------------------
-                # Only start Empty checking after YOLO has
-                # been missing the cat for a while.
-                # --------------------------------------------
-
-                if (
-                    last_cat_detected_time
-                    is not None
-                    and
-                    now
-                    - last_cat_detected_time
-                    >= NO_CAT_SECONDS
-                ):
-
-
-                    # ========================================
-                    # occupancy:
-                    #
-                    # Check whether the whole toilet is empty
-                    # ========================================
-
-                    occupancy_scores = classify_occupancy(frame)
-                    empty = occupancy_scores[EMPTY_CLASS]
-
-                    print(
-                        "   occupancy state: "
-                        + "  ".join(
-                            f"{class_name.capitalize()}={occupancy_scores[class_name]:.3f}"
-                            for class_name in OCCUPANCY_CLASSES
-                        )
+                    f"🐱 {identity or 'UNKNOWN'} "
+                    f"det={detection_conf:.2f} "
+                    f"confidence={confidence:.2f} "
+                    + "  ".join(
+                        f"{class_name.capitalize()}={average_scores[class_name]:.2f}"
+                        for class_name in IDENTITY_CLASSES
                     )
+                )
+            else:
+                print("⬜ No identity detection")
 
+            # =================================================
+            # Always evaluate occupancy while occupied. Only leave
+            # when the toilet is empty long enough.
+            # ====================================================
 
-                    # ========================================
-                    # Empty probability high enough
-                    # ========================================
+            occupancy_scores = classify_occupancy(frame)
+            empty = occupancy_scores.get(EMPTY_CLASS, 0.0)
 
-                    if (
-                        empty
-                        >= EMPTY_THRESHOLD
-                    ):
+            print(
+                "   occupancy state: "
+                + "  ".join(
+                    f"{class_name.capitalize()}={occupancy_scores[class_name]:.3f}"
+                    for class_name in OCCUPANCY_CLASSES
+                )
+            )
 
+            if empty >= EMPTY_THRESHOLD:
+                if empty_confirm_start is None:
+                    empty_confirm_start = now
+                    print("   → Possible cat leaving...")
+                else:
+                    empty_duration = now - empty_confirm_start
+                    print(f"   → Empty for {empty_duration:.1f}s")
 
-                        if (
-                            empty_confirm_start
-                            is None
-                        ):
+                    if empty_duration >= EMPTY_CONFIRM_SECONDS:
+                        state = "CLEANUP"
+                        duration = now - event_start_time
 
-                            empty_confirm_start = now
-
-
-                            print(
-                                "   → Possible "
-                                "cat leaving..."
-                            )
-
-
+                        if identity_samples == 0:
+                            average_scores = {
+                                class_name: 0.0 for class_name in IDENTITY_CLASSES
+                            }
+                            cat_name = UNKNOWN_IDENTITY_LABEL
                         else:
+                            average_scores = {
+                                class_name: identity_scores[class_name] / identity_samples
+                                for class_name in IDENTITY_CLASSES
+                            }
+                            cat_name = max(average_scores, key=average_scores.get).upper()
 
-                            empty_duration = (
-                                now
-                                - empty_confirm_start
-                            )
+                        print()
+                        print("🔴 CAT LEFT")
+                        print(f"Cat: {cat_name}")
+                        print(f"Duration: {duration:.1f}s")
+                        print(f"Identity samples: {identity_samples}")
 
-
+                        for class_name in IDENTITY_CLASSES:
                             print(
-                                f"   → Empty for "
-                                f"{empty_duration:.1f}s"
+                                f"{class_name.capitalize()} score: "
+                                f"{average_scores[class_name]:.3f}"
                             )
 
+                        event_datetime = datetime.now()
+                        date_dir = EVENTS_DIR / event_datetime.strftime("%Y-%m-%d")
+                        event_name = event_datetime.strftime("%H-%M-%S") + "_" + cat_name
+                        current_event_dir = date_dir / event_name
+                        current_event_dir.mkdir(parents=True, exist_ok=True)
 
-                            # =================================
-                            # Confirm cat has left
-                            # =================================
+                        if best_cat_crop is not None:
+                            cat_image_path = current_event_dir / "cat.jpg"
+                            cv2.imwrite(str(cat_image_path), best_cat_crop)
+                            print(f"📸 Cat image saved: {cat_image_path}")
+                        else:
+                            print("⚠️ No cat image available for this event")
 
-                            if (
-                                empty_duration
-                                >= EMPTY_CONFIRM_SECONDS
-                            ):
-
-
-                                state = "CLEANUP"
-
-
-                                duration = (
-                                    now
-                                    - event_start_time
-                                )
-
-
-                                # ---------------------------------
-                                # Determine final identity
-                                # ---------------------------------
-
-                                if identity_samples == 0:
-                                    average_scores = {
-                                        class_name: 0.0
-                                        for class_name in IDENTITY_CLASSES
-                                    }
-                                    cat_name = UNKNOWN_IDENTITY_LABEL
-                                else:
-                                    average_scores = {
-                                        class_name: identity_scores[class_name]
-                                        / identity_samples
-                                        for class_name in IDENTITY_CLASSES
-                                    }
-                                    cat_name = max(
-                                        average_scores,
-                                        key=average_scores.get
-                                    ).upper()
+                        sample_save_time = now + SAMPLE_DELAY_SECONDS
+                        print(f"⏳ Waiting {SAMPLE_DELAY_SECONDS:.0f} seconds...")
+                        print()
+            else:
+                empty_confirm_start = None
+                print("   → Not empty yet")
 
 
-                                # ---------------------------------
-                                # Print event summary
-                                # ---------------------------------
-
-                                print()
-
-                                print(
-                                    "🔴 CAT LEFT"
-                                )
-
-                                print(
-                                    f"Cat: "
-                                    f"{cat_name}"
-                                )
-
-                                print(
-                                    f"Duration: "
-                                    f"{duration:.1f}s"
-                                )
-
-                                print(
-                                    f"Identity samples: "
-                                    f"{identity_samples}"
-                                )
-
-                                for class_name in IDENTITY_CLASSES:
-                                    print(
-                                        f"{class_name.capitalize()} score: "
-                                        f"{average_scores[class_name]:.3f}"
-                                    )
-
-
-                                # ---------------------------------
-                                # Create event directory
-                                # ---------------------------------
-
-                                event_datetime = (
-                                    datetime.now()
-                                )
-
-
-                                date_dir = (
-                                    EVENTS_DIR
-                                    /
-                                    event_datetime.strftime(
-                                        "%Y-%m-%d"
-                                    )
-                                )
-
-
-                                event_name = (
-                                    event_datetime.strftime(
-                                        "%H-%M-%S"
-                                    )
-                                    +
-                                    "_"
-                                    +
-                                    cat_name
-                                )
-
-
-                                current_event_dir = (
-                                    date_dir
-                                    /
-                                    event_name
-                                )
-
-                                current_event_dir.mkdir(
-                                    parents=True,
-                                    exist_ok=True
-                                )
-
-                                # ---------------------------------
-                                # Save the highest-confidence cat image
-                                # ---------------------------------
-
-                                if best_cat_crop is not None:
-                                    cat_image_path = (
-                                        current_event_dir
-                                        /
-                                        "cat.jpg"
-                                    )
-                                    cv2.imwrite(
-                                        str(cat_image_path),
-                                        best_cat_crop
-                                    )
-                                    print(
-                                        "📸 Cat image saved: "
-                                        f"{cat_image_path}"
-                                    )
-                                else:
-                                    print(
-                                        "⚠️ No cat image available for this event"
-                                    )
-
-                                sample_save_time = (
-                                    now
-                                    +
-                                    SAMPLE_DELAY_SECONDS
-                                )
-
-
-                                print(
-                                    "⏳ Waiting "
-                                    f"{SAMPLE_DELAY_SECONDS:.0f} "
-                                    "seconds..."
-                                )
-
-                                print()
-
-
-                    else:
-
-                        # ----------------------------------------
-                        # Not sufficiently empty.
-                        #
-                        # Could be:
-                        # - cat still inside
-                        # - cleaning
-                        # - transition frame
-                        # - classifier uncertainty
-                        # ----------------------------------------
-
-                        empty_confirm_start = None
-
-
-                        print(
-                            "   → Not empty yet"
-                        )
 
 
         # ====================================================

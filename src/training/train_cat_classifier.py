@@ -29,7 +29,8 @@ IDENTITY_CLASSES = config["cats"]["identity_classes"]
 EMPTY_CLASS = config["cats"]["occupancy_empty_class"]
 OCCUPANCY_CLASSES = config["cats"]["occupancy_classes"]
 
-MODEL_WEIGHTS = config["models"]["classification_model"]
+CLASSIFICATION_MODEL_WEIGHTS = config["models"]["classification_model"]
+DETECTION_MODEL_WEIGHTS = config["models"]["detection_model"]
 
 
 def parse_args(argv=None):
@@ -229,9 +230,71 @@ def build_occupancy_dataset(train_dir: Path, val_dir: Path, tmp_root: Path):
     return occupancy_root
 
 
-def train_model(task: str, data_root: Path, args):
-    print(f"Training {task} model using dataset: {data_root}")
-    model = YOLO(MODEL_WEIGHTS)
+def build_identity_detection_dataset(train_dir: Path, val_dir: Path, tmp_root: Path):
+    print(f"Building direct YOLO identity detection dataset in {tmp_root}")
+    detection_root = tmp_root / "identity_detection"
+    shutil.rmtree(detection_root, ignore_errors=True)
+
+    for split_dir in [train_dir, val_dir]:
+        split_name = split_dir.name
+        split_root = detection_root / split_name
+        images_dir = split_root / "images"
+        labels_dir = split_root / "labels"
+        ensure_dir(images_dir)
+        ensure_dir(labels_dir)
+
+        for class_name in IDENTITY_CLASSES:
+            src_class_dir = split_dir / class_name
+            if not src_class_dir.is_dir():
+                raise RuntimeError(
+                    f"Missing class folder for identity detection: {src_class_dir}"
+                )
+
+            for image_path in sorted(src_class_dir.iterdir()):
+                if not image_path.is_file() or image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    continue
+
+                target_image = images_dir / image_path.name
+                shutil.copy2(image_path, target_image)
+
+                label_path = labels_dir / f"{image_path.stem}.txt"
+                class_index = IDENTITY_CLASSES.index(class_name)
+                with open(label_path, "w", encoding="utf-8") as handle:
+                    handle.write(f"{class_index} 0.5 0.5 1.0 1.0\n")
+
+    data_yaml = detection_root / "data.yaml"
+    data_yaml.write_text(
+        "train: " + str((detection_root / "train" / "images").resolve()) + "\n"
+        "val: " + str((detection_root / "val" / "images").resolve()) + "\n"
+        f"nc: {len(IDENTITY_CLASSES)}\n"
+        "names: [" + ", ".join(f'"{name}"' for name in IDENTITY_CLASSES) + "]\n",
+        encoding="utf-8",
+    )
+
+    return detection_root
+
+
+def train_identity_detection_model(data_root: Path, args):
+    print(f"Training identity detection model using dataset: {data_root}")
+    model = YOLO(DETECTION_MODEL_WEIGHTS)
+    model.train(
+        data=str(data_root / "data.yaml"),
+        epochs=args.epochs,
+        imgsz=args.imgsz,
+        batch=args.batch,
+        device=args.device,
+        workers=0,
+        project=args.project,
+        name="identity",
+        exist_ok=args.exist_ok,
+        save=True,
+    )
+    print(f"Finished training identity detection model. Best model saved to {args.project}/identity/weights/best.pt")
+
+
+def train_classification_model(task: str, data_root: Path, args):
+    print(f"Training {task} classification model using dataset: {data_root}")
+    model = YOLO(CLASSIFICATION_MODEL_WEIGHTS)
     model.train(
         data=str(data_root),
         epochs=args.epochs,
@@ -270,12 +333,12 @@ def run_training(args):
         tasks = [args.task] if args.task != "all" else ["identity", "occupancy"]
 
         if "identity" in tasks:
-            identity_root = build_identity_dataset(train_dir, val_dir, tmp_root)
-            train_model("identity", identity_root, args)
+            identity_root = build_identity_detection_dataset(train_dir, val_dir, tmp_root)
+            train_identity_detection_model(identity_root, args)
 
         if "occupancy" in tasks:
             occupancy_root = build_occupancy_dataset(train_dir, val_dir, tmp_root)
-            train_model("occupancy", occupancy_root, args)
+            train_classification_model("occupancy", occupancy_root, args)
 
         print("\nAll requested training tasks are complete.")
 
