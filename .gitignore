@@ -12,3 +12,5 @@ __pycache__/
 *.pyc
 
 my_config.yaml
+/models
+/dataset
