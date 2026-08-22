@@ -5,7 +5,6 @@ from typing import Any
 
 import yaml
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 
@@ -32,7 +31,7 @@ def _substitute_env(value: Any) -> Any:
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     config_path = Path(path) if path is not None else CONFIG_PATH
-    with open(config_path, "r", encoding="utf-8") as handle:
+    with open(config_path, encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return _substitute_env(data)
 

@@ -1,7 +1,7 @@
 import sys
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 from ultralytics import YOLO
@@ -21,7 +21,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config_loader import load_config, resolve_config_path
 
-
 # ============================================================
 # Paths
 # ============================================================
@@ -35,14 +34,10 @@ IDENTITY_MODEL = resolve_config_path(CONFIG["models"]["identity_model_path"])
 OCCUPANCY_MODEL = resolve_config_path(CONFIG["models"]["occupancy_model_path"])
 
 if not IDENTITY_MODEL.exists():
-    raise RuntimeError(
-        f"Identity model not found: {IDENTITY_MODEL}"
-    )
+    raise RuntimeError(f"Identity model not found: {IDENTITY_MODEL}")
 
 if not OCCUPANCY_MODEL.exists():
-    raise RuntimeError(
-        f"Occupancy model not found: {OCCUPANCY_MODEL}"
-    )
+    raise RuntimeError(f"Occupancy model not found: {OCCUPANCY_MODEL}")
 
 IDENTITY_CLASSES = CONFIG["cats"]["identity_classes"]
 EMPTY_CLASS = CONFIG["cats"]["occupancy_empty_class"]
@@ -117,6 +112,7 @@ def register_notification_callback(callback):
 
 try:
     from src.notification.notification_controller import send_notification as _send_notification
+
     register_notification_callback(_send_notification)
     print("🔔 Notification callback registered")
 except Exception as exc:
@@ -129,16 +125,12 @@ except Exception as exc:
 
 print("Loading YOLO detection model...")
 
-detection_model = YOLO(
-    DETECTION_MODEL
-)
+detection_model = YOLO(DETECTION_MODEL)
 
 
 print("Loading identity classifier...")
 
-identity_model = YOLO(
-    str(IDENTITY_MODEL)
-)
+identity_model = YOLO(str(IDENTITY_MODEL))
 
 print("Identity classes:")
 print(identity_model.names)
@@ -147,9 +139,7 @@ print(identity_model.names)
 print()
 print("Loading occupancy classifier...")
 
-occupancy_model = YOLO(
-    str(OCCUPANCY_MODEL)
-)
+occupancy_model = YOLO(str(OCCUPANCY_MODEL))
 
 print("Occupancy classes:")
 print(occupancy_model.names)
@@ -184,15 +174,10 @@ if not set(OCCUPANCY_CLASSES).issubset(occupancy_names):
 
 print("Opening RTSP stream...")
 
-cap = cv2.VideoCapture(
-    RTSP_URL
-)
+cap = cv2.VideoCapture(RTSP_URL)
 
 if not cap.isOpened():
-
-    raise RuntimeError(
-        "❌ Cannot open RTSP"
-    )
+    raise RuntimeError("❌ Cannot open RTSP")
 
 
 print("✅ RTSP connected")
@@ -229,10 +214,7 @@ last_cat_detected_time = None
 # Identity accumulation
 # ============================================================
 
-identity_scores = {
-    class_name: 0.0
-    for class_name in IDENTITY_CLASSES
-}
+identity_scores = {class_name: 0.0 for class_name in IDENTITY_CLASSES}
 
 identity_samples = 0
 
@@ -261,10 +243,9 @@ best_cat_conf = 0.0
 # get class id from class name
 # ============================================================
 
+
 def get_class_id(names, class_name):
-
     for class_id, name in names.items():
-
         if name == class_name:
             return class_id
 
@@ -280,76 +261,38 @@ def get_class_id(names, class_name):
 #   detection_conf
 # ============================================================
 
-def detect_cat(frame):
 
-    results = detection_model(
-        frame,
-        conf=CAT_DETECTION_CONF,
-        verbose=False
-    )
+def detect_cat(frame):
+    results = detection_model(frame, conf=CAT_DETECTION_CONF, verbose=False)
 
     result = results[0]
 
     if result.boxes is None:
-
-        return (
-            False,
-            None,
-            0.0
-        )
-
+        return (False, None, 0.0)
 
     best_box = None
 
     best_conf = 0.0
 
-
     for box in result.boxes:
+        cls_id = int(box.cls[0])
 
-        cls_id = int(
-            box.cls[0]
-        )
+        confidence = float(box.conf[0])
 
-        confidence = float(
-            box.conf[0]
-        )
-
-        class_name = (
-            result.names[cls_id]
-        )
-
+        class_name = result.names[cls_id]
 
         if class_name.lower() != "cat":
-
             continue
 
-
         if confidence > best_conf:
-
             best_conf = confidence
 
-            best_box = (
-                box.xyxy[0]
-                .cpu()
-                .numpy()
-                .astype(int)
-            )
-
+            best_box = box.xyxy[0].cpu().numpy().astype(int)
 
     if best_box is None:
+        return (False, None, 0.0)
 
-        return (
-            False,
-            None,
-            0.0
-        )
-
-
-    return (
-        True,
-        best_box,
-        best_conf
-    )
+    return (True, best_box, best_conf)
 
 
 # ============================================================
@@ -363,12 +306,11 @@ def detect_cat(frame):
 #   class probabilities for each identity
 # ============================================================
 
-def classify_identity(frame, box):
 
+def classify_identity(frame, box):
     x1, y1, x2, y2 = box
 
     h, w = frame.shape[:2]
-
 
     # --------------------------------------------
     # Clamp bounding box
@@ -406,9 +348,7 @@ def classify_identity(frame, box):
     for class_name in IDENTITY_CLASSES:
         class_id = get_class_id(names, class_name)
         if class_id is None:
-            raise RuntimeError(
-                f"identity model does not contain {class_name}"
-            )
+            raise RuntimeError(f"identity model does not contain {class_name}")
         class_probs[class_name] = float(probs[class_id])
 
     identity = max(class_probs, key=class_probs.get).upper()
@@ -426,8 +366,8 @@ def classify_identity(frame, box):
 #   occupancy probabilities for empty and non-empty
 # ============================================================
 
-def classify_occupancy(frame):
 
+def classify_occupancy(frame):
     results = occupancy_model(frame, verbose=False)
     result = results[0]
 
@@ -442,9 +382,7 @@ def classify_occupancy(frame):
     for class_name in OCCUPANCY_CLASSES:
         class_id = get_class_id(names, class_name)
         if class_id is None:
-            raise RuntimeError(
-                f"occupancy model does not contain {class_name}"
-            )
+            raise RuntimeError(f"occupancy model does not contain {class_name}")
         class_probs[class_name] = float(probs[class_id])
 
     return class_probs
@@ -458,59 +396,39 @@ last_prediction_time = 0.0
 
 
 try:
-
     while True:
-
         # ====================================================
         # Read RTSP frame
         # ====================================================
 
         ret, frame = cap.read()
 
-
         if not ret:
-
-            print(
-                "⚠️ Failed to read RTSP frame"
-            )
+            print("⚠️ Failed to read RTSP frame")
 
             time.sleep(0.1)
 
             continue
 
-
         last_frame = frame.copy()
 
-
         now = time.time()
-
 
         # ====================================================
         # Sampling interval
         # ====================================================
 
-        if (
-            now - last_prediction_time
-            < INTERVAL
-        ):
-
+        if now - last_prediction_time < INTERVAL:
             continue
 
-
         last_prediction_time = now
-
 
         # ====================================================
         # YOLO:
         # Is there actually a cat?
         # ====================================================
 
-        (
-            has_cat,
-            cat_box,
-            detection_conf
-        ) = detect_cat(frame)
-
+        (has_cat, cat_box, detection_conf) = detect_cat(frame)
 
         # ====================================================
         # WAITING
@@ -519,71 +437,41 @@ try:
         # ====================================================
 
         if state == "WAITING":
-
-
             if has_cat:
-
-                print(
-                    f"🐱 Cat detected "
-                    f"(detection="
-                    f"{detection_conf:.2f})"
-                )
-
+                print(f"🐱 Cat detected (detection={detection_conf:.2f})")
 
                 # --------------------------------------------
                 # Start / continue enter window
                 # --------------------------------------------
 
-                if (
-                    enter_window_start
-                    is None
-                ):
-
+                if enter_window_start is None:
                     enter_window_start = now
 
                     enter_detection_count = 1
 
-                    print(
-                        "  → Possible "
-                        "cat entering..."
-                    )
+                    print("  → Possible cat entering...")
 
                 else:
-
                     enter_detection_count += 1
-
 
                 # --------------------------------------------
                 # Confirm entering
                 # --------------------------------------------
 
-                elapsed = (
-                    now
-                    - enter_window_start
-                )
-
+                elapsed = now - enter_window_start
 
                 if (
-                    elapsed
-                    <= ENTER_WINDOW_SECONDS
-                    and
-                    enter_detection_count
-                    >= ENTER_MIN_DETECTIONS
+                    elapsed <= ENTER_WINDOW_SECONDS
+                    and enter_detection_count >= ENTER_MIN_DETECTIONS
                 ):
-
                     state = "OCCUPIED"
-
 
                     event_start_time = now
 
                     last_cat_detected_time = now
 
-
                     # Reset identity
-                    identity_scores = {
-                        class_name: 0.0
-                        for class_name in IDENTITY_CLASSES
-                    }
+                    identity_scores = {class_name: 0.0 for class_name in IDENTITY_CLASSES}
 
                     identity_samples = 0
 
@@ -593,25 +481,16 @@ try:
                     # Reset empty
                     empty_confirm_start = None
 
-
                     # Reset enter detector
                     enter_window_start = None
 
                     enter_detection_count = 0
 
-
                     print()
-                    print(
-                        "🟢 CAT ENTERED"
-                    )
+                    print("🟢 CAT ENTERED")
                     print()
 
-
-                elif (
-                    elapsed
-                    > ENTER_WINDOW_SECONDS
-                ):
-
+                elif elapsed > ENTER_WINDOW_SECONDS:
                     # Window expired.
                     # Start again.
 
@@ -619,31 +498,20 @@ try:
 
                     enter_detection_count = 1
 
-
             else:
-
-                print(
-                    "⬜ No cat"
-                )
-
+                print("⬜ No cat")
 
                 # --------------------------------------------
                 # Reset expired enter window
                 # --------------------------------------------
 
                 if (
-                    enter_window_start
-                    is not None
-                    and
-                    now
-                    - enter_window_start
-                    > ENTER_WINDOW_SECONDS
+                    enter_window_start is not None
+                    and now - enter_window_start > ENTER_WINDOW_SECONDS
                 ):
-
                     enter_window_start = None
 
                     enter_detection_count = 0
-
 
         # ====================================================
         # OCCUPIED
@@ -652,14 +520,11 @@ try:
         # ====================================================
 
         elif state == "OCCUPIED":
-
-
             # =================================================
             # CAT DETECTED
             # =================================================
 
             if has_cat:
-
                 last_cat_detected_time = now
 
                 # Cat detected again,
@@ -667,10 +532,7 @@ try:
 
                 empty_confirm_start = None
 
-                if (
-                    cat_box is not None
-                    and detection_conf > best_cat_conf
-                ):
+                if cat_box is not None and detection_conf > best_cat_conf:
                     x1, y1, x2, y2 = cat_box
                     h, w = frame.shape[:2]
                     x1 = max(0, x1)
@@ -687,10 +549,7 @@ try:
                 # Determine identity
                 # --------------------------------------------
 
-                identity, class_probs = classify_identity(
-                    frame,
-                    cat_box
-                )
+                identity, class_probs = classify_identity(frame, cat_box)
 
                 if identity is not None:
                     identity_samples += 1
@@ -715,17 +574,12 @@ try:
                         )
                     )
 
-
             # =================================================
             # NO CAT DETECTED
             # =================================================
 
             else:
-
-                print(
-                    "⬜ No cat"
-                )
-
+                print("⬜ No cat")
 
                 # --------------------------------------------
                 # Only start Empty checking after YOLO has
@@ -733,15 +587,9 @@ try:
                 # --------------------------------------------
 
                 if (
-                    last_cat_detected_time
-                    is not None
-                    and
-                    now
-                    - last_cat_detected_time
-                    >= NO_CAT_SECONDS
+                    last_cat_detected_time is not None
+                    and now - last_cat_detected_time >= NO_CAT_SECONDS
                 ):
-
-
                     # ========================================
                     # occupancy:
                     #
@@ -759,63 +607,29 @@ try:
                         )
                     )
 
-
                     # ========================================
                     # Empty probability high enough
                     # ========================================
 
-                    if (
-                        empty
-                        >= EMPTY_THRESHOLD
-                    ):
-
-
-                        if (
-                            empty_confirm_start
-                            is None
-                        ):
-
+                    if empty >= EMPTY_THRESHOLD:
+                        if empty_confirm_start is None:
                             empty_confirm_start = now
 
-
-                            print(
-                                "   → Possible "
-                                "cat leaving..."
-                            )
-
+                            print("   → Possible cat leaving...")
 
                         else:
+                            empty_duration = now - empty_confirm_start
 
-                            empty_duration = (
-                                now
-                                - empty_confirm_start
-                            )
-
-
-                            print(
-                                f"   → Empty for "
-                                f"{empty_duration:.1f}s"
-                            )
-
+                            print(f"   → Empty for {empty_duration:.1f}s")
 
                             # =================================
                             # Confirm cat has left
                             # =================================
 
-                            if (
-                                empty_duration
-                                >= EMPTY_CONFIRM_SECONDS
-                            ):
-
-
+                            if empty_duration >= EMPTY_CONFIRM_SECONDS:
                                 state = "CLEANUP"
 
-
-                                duration = (
-                                    now
-                                    - event_start_time
-                                )
-
+                                duration = now - event_start_time
 
                                 # ---------------------------------
                                 # Determine final identity
@@ -823,21 +637,15 @@ try:
 
                                 if identity_samples == 0:
                                     average_scores = {
-                                        class_name: 0.0
-                                        for class_name in IDENTITY_CLASSES
+                                        class_name: 0.0 for class_name in IDENTITY_CLASSES
                                     }
                                     cat_name = UNKNOWN_IDENTITY_LABEL
                                 else:
                                     average_scores = {
-                                        class_name: identity_scores[class_name]
-                                        / identity_samples
+                                        class_name: identity_scores[class_name] / identity_samples
                                         for class_name in IDENTITY_CLASSES
                                     }
-                                    cat_name = max(
-                                        average_scores,
-                                        key=average_scores.get
-                                    ).upper()
-
+                                    cat_name = max(average_scores, key=average_scores.get).upper()
 
                                 # ---------------------------------
                                 # Print event summary
@@ -845,24 +653,13 @@ try:
 
                                 print()
 
-                                print(
-                                    "🔴 CAT LEFT"
-                                )
+                                print("🔴 CAT LEFT")
 
-                                print(
-                                    f"Cat: "
-                                    f"{cat_name}"
-                                )
+                                print(f"Cat: {cat_name}")
 
-                                print(
-                                    f"Duration: "
-                                    f"{duration:.1f}s"
-                                )
+                                print(f"Duration: {duration:.1f}s")
 
-                                print(
-                                    f"Identity samples: "
-                                    f"{identity_samples}"
-                                )
+                                print(f"Identity samples: {identity_samples}")
 
                                 for class_name in IDENTITY_CLASSES:
                                     print(
@@ -870,88 +667,38 @@ try:
                                         f"{average_scores[class_name]:.3f}"
                                     )
 
-
                                 # ---------------------------------
                                 # Create event directory
                                 # ---------------------------------
 
-                                event_datetime = (
-                                    datetime.now()
-                                )
+                                event_datetime = datetime.now()
 
+                                date_dir = EVENTS_DIR / event_datetime.strftime("%Y-%m-%d")
 
-                                date_dir = (
-                                    EVENTS_DIR
-                                    /
-                                    event_datetime.strftime(
-                                        "%Y-%m-%d"
-                                    )
-                                )
+                                event_name = event_datetime.strftime("%H-%M-%S") + "_" + cat_name
 
+                                current_event_dir = date_dir / event_name
 
-                                event_name = (
-                                    event_datetime.strftime(
-                                        "%H-%M-%S"
-                                    )
-                                    +
-                                    "_"
-                                    +
-                                    cat_name
-                                )
-
-
-                                current_event_dir = (
-                                    date_dir
-                                    /
-                                    event_name
-                                )
-
-                                current_event_dir.mkdir(
-                                    parents=True,
-                                    exist_ok=True
-                                )
+                                current_event_dir.mkdir(parents=True, exist_ok=True)
 
                                 # ---------------------------------
                                 # Save the highest-confidence cat image
                                 # ---------------------------------
 
                                 if best_cat_crop is not None:
-                                    cat_image_path = (
-                                        current_event_dir
-                                        /
-                                        "cat.jpg"
-                                    )
-                                    cv2.imwrite(
-                                        str(cat_image_path),
-                                        best_cat_crop
-                                    )
-                                    print(
-                                        "📸 Cat image saved: "
-                                        f"{cat_image_path}"
-                                    )
+                                    cat_image_path = current_event_dir / "cat.jpg"
+                                    cv2.imwrite(str(cat_image_path), best_cat_crop)
+                                    print(f"📸 Cat image saved: {cat_image_path}")
                                 else:
-                                    print(
-                                        "⚠️ No cat image available for this event"
-                                    )
+                                    print("⚠️ No cat image available for this event")
 
-                                sample_save_time = (
-                                    now
-                                    +
-                                    SAMPLE_DELAY_SECONDS
-                                )
+                                sample_save_time = now + SAMPLE_DELAY_SECONDS
 
-
-                                print(
-                                    "⏳ Waiting "
-                                    f"{SAMPLE_DELAY_SECONDS:.0f} "
-                                    "seconds..."
-                                )
+                                print(f"⏳ Waiting {SAMPLE_DELAY_SECONDS:.0f} seconds...")
 
                                 print()
 
-
                     else:
-
                         # ----------------------------------------
                         # Not sufficiently empty.
                         #
@@ -964,11 +711,7 @@ try:
 
                         empty_confirm_start = None
 
-
-                        print(
-                            "   → Not empty yet"
-                        )
-
+                        print("   → Not empty yet")
 
         # ====================================================
         # CLEANUP
@@ -978,80 +721,34 @@ try:
         # ====================================================
 
         elif state == "CLEANUP":
-
-
-            if (
-                sample_save_time
-                is not None
-                and
-                now
-                >= sample_save_time
-            ):
-
-
-                if (
-                    current_event_dir
-                    is not None
-                ):
-
-
+            if sample_save_time is not None and now >= sample_save_time:
+                if current_event_dir is not None:
                     cat_image_path = None
                     if best_cat_crop is not None:
                         cat_image_path = current_event_dir / "cat.jpg"
 
-                    sample_path = (
-                        current_event_dir
-                        /
-                        "after_2s.jpg"
-                    )
+                    sample_path = current_event_dir / "after_2s.jpg"
 
+                    cv2.imwrite(str(sample_path), frame)
 
-                    cv2.imwrite(
-                        str(sample_path),
-                        frame
-                    )
+                    print(f"📸 Toilet sample saved: {sample_path}")
 
-
-                    print(
-                        "📸 Toilet sample saved: "
-                        f"{sample_path}"
-                    )
-
-                    if (
-                        notification_callback
-                        is not None
-                        and current_event_dir is not None
-                    ):
+                    if notification_callback is not None and current_event_dir is not None:
                         attachment_paths = []
                         if cat_image_path is not None:
-                            attachment_paths.append(
-                                str(cat_image_path)
-                            )
-                        attachment_paths.append(
-                            str(sample_path)
-                        )
+                            attachment_paths.append(str(cat_image_path))
+                        attachment_paths.append(str(sample_path))
 
                         try:
-                            notification_callback(
-                                cat_name,
-                                attachment_paths
-                            )
+                            notification_callback(cat_name, attachment_paths)
                         except Exception as exc:
-                            print(
-                                "⚠️ Failed to send notification:",
-                                exc
-                            )
+                            print("⚠️ Failed to send notification:", exc)
 
-                    print(
-                        "👉 Please manually label:"
-                    )
+                    print("👉 Please manually label:")
 
-                    print(
-                        "   poop / pee / unknown"
-                    )
+                    print("   poop / pee / unknown")
 
                     print()
-
 
                 # --------------------------------------------
                 # Reset everything for next event
@@ -1061,34 +758,23 @@ try:
 
                 state = "WAITING"
 
-
                 event_start_time = None
 
                 last_cat_detected_time = None
 
                 empty_confirm_start = None
 
-
-                identity_scores = {
-                    class_name: 0.0
-                    for class_name in IDENTITY_CLASSES
-                }
+                identity_scores = {class_name: 0.0 for class_name in IDENTITY_CLASSES}
 
                 identity_samples = 0
 
-
                 current_event_dir = None
-
 
                 enter_window_start = None
 
                 enter_detection_count = 0
 
-
-                print(
-                    "🟦 Ready for next "
-                    "toilet event"
-                )
+                print("🟦 Ready for next toilet event")
 
                 print()
 
@@ -1098,15 +784,11 @@ try:
 # ============================================================
 
 except KeyboardInterrupt:
-
     print()
     print("Stopping...")
 
 
 finally:
-
     cap.release()
 
-    print(
-        "RTSP closed."
-    )
+    print("RTSP closed.")

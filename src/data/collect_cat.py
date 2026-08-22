@@ -22,7 +22,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config_loader import load_config, resolve_config_path
 
-
 # ============================================================
 # Configuration
 # ============================================================
@@ -41,6 +40,7 @@ PADDING = CONFIG["collect"]["padding"]
 # ============================================================
 # Main
 # ============================================================
+
 
 def collect_images(label: str, target: int):
     output_dir = PICTURES_ROOT / label
@@ -73,16 +73,14 @@ def collect_images(label: str, target: int):
     print("Press Ctrl+C to stop manually.")
     print()
 
-    saved_count = len([
-        f for f in os.listdir(output_dir)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ])
+    saved_count = len(
+        [f for f in os.listdir(output_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+    )
 
     last_save_time = 0
 
     try:
         while saved_count < target:
-
             ret, frame = cap.read()
 
             if not ret:
@@ -91,10 +89,7 @@ def collect_images(label: str, target: int):
                 continue
 
             # Run YOLO
-            results = model(
-                frame,
-                verbose=False
-            )
+            results = model(frame, verbose=False)
 
             result = results[0]
 
@@ -103,9 +98,7 @@ def collect_images(label: str, target: int):
 
             # Find the cat with highest confidence
             if result.boxes is not None:
-
                 for box in result.boxes:
-
                     class_id = int(box.cls[0])
                     confidence = float(box.conf[0])
 
@@ -165,11 +158,7 @@ def collect_images(label: str, target: int):
 
             last_save_time = current_time
 
-            print(
-                f"[{saved_count:4d}/{target}] "
-                f"saved {filename} "
-                f"(confidence={best_conf:.2f})"
-            )
+            print(f"[{saved_count:4d}/{target}] saved {filename} (confidence={best_conf:.2f})")
 
         print()
         print("=" * 60)
@@ -191,27 +180,12 @@ def collect_images(label: str, target: int):
 # ============================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Collect cat images automatically using YOLO.")
 
-    parser = argparse.ArgumentParser(
-        description="Collect cat images automatically using YOLO."
-    )
+    parser.add_argument("--label", required=True, help="Cat label, e.g. cat_a or cat_b")
 
-    parser.add_argument(
-        "--label",
-        required=True,
-        help="Cat label, e.g. cat_a or cat_b"
-    )
-
-    parser.add_argument(
-        "--target",
-        type=int,
-        default=300,
-        help="Number of images to collect"
-    )
+    parser.add_argument("--target", type=int, default=300, help="Number of images to collect")
 
     args = parser.parse_args()
 
-    collect_images(
-        label=args.label,
-        target=args.target
-    )
+    collect_images(label=args.label, target=args.target)

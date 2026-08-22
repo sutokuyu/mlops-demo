@@ -2,8 +2,8 @@ import json
 import mimetypes
 import smtplib
 import sys
-import uuid
 import urllib.request
+import uuid
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -20,7 +20,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, resolve_config_path
+from src.config_loader import load_config
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 NOTIFICATION_CONFIG = CONFIG.get("notification", {})
@@ -36,23 +36,14 @@ SMTP_PASSWORD = MAIL_CONFIG.get("smtp_password", "")
 FROM_EMAIL = MAIL_CONFIG.get("from_email", SMTP_USERNAME)
 USE_TLS = MAIL_CONFIG.get("use_tls", True)
 USE_SSL = MAIL_CONFIG.get("use_ssl", False)
-SUBJECT_TEMPLATE = MAIL_CONFIG.get(
-    "subject_template",
-    "{cat_name} used the toilet"
-)
-BODY_TEMPLATE = MAIL_CONFIG.get(
-    "body_template",
-    "A cat used the toilet. See attached image."
-)
+SUBJECT_TEMPLATE = MAIL_CONFIG.get("subject_template", "{cat_name} used the toilet")
+BODY_TEMPLATE = MAIL_CONFIG.get("body_template", "A cat used the toilet. See attached image.")
 
 DISCORD_CONFIG = NOTIFICATION_CONFIG.get("discord", {})
 DISCORD_WEBHOOK_URL = DISCORD_CONFIG.get("webhook_url", "")
 DISCORD_USERNAME = DISCORD_CONFIG.get("username", "Toilet Monitor")
 DISCORD_AVATAR_URL = DISCORD_CONFIG.get("avatar_url", "")
-DISCORD_CONTENT_TEMPLATE = DISCORD_CONFIG.get(
-    "content_template",
-    "{cat_name} used the toilet"
-)
+DISCORD_CONTENT_TEMPLATE = DISCORD_CONFIG.get("content_template", "{cat_name} used the toilet")
 
 
 def _build_message(cat_name: str, attachment_paths: list[Path]) -> EmailMessage:
@@ -96,11 +87,11 @@ def _send_discord_notification(cat_name: str, attachment_paths: list[Path]) -> N
     payload_part = (
         f"--{boundary}"
         "\r\n"
-        "Content-Disposition: form-data; name=\"payload_json\""
+        'Content-Disposition: form-data; name="payload_json"'
         "\r\n\r\n"
         f"{json.dumps(content)}"
         "\r\n"
-    ).encode("utf-8")
+    ).encode()
 
     body = payload_part
 
@@ -115,15 +106,15 @@ def _send_discord_notification(cat_name: str, attachment_paths: list[Path]) -> N
         file_part = (
             f"--{boundary}"
             "\r\n"
-            f"Content-Disposition: form-data; name=\"files[{index}]\"; filename=\"{attachment_path.name}\""
+            f'Content-Disposition: form-data; name="files[{index}]"; filename="{attachment_path.name}"'
             "\r\n"
             f"Content-Type: {mimetype}"
             "\r\n\r\n"
-        ).encode("utf-8")
+        ).encode()
 
         body += file_part + file_data + b"\r\n"
 
-    body += f"--{boundary}--\r\n".encode("utf-8")
+    body += f"--{boundary}--\r\n".encode()
 
     request = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
