@@ -29,9 +29,7 @@ INDEX_RE = re.compile(r"^(\d+)\.(?:jpg|jpeg|png)$", re.IGNORECASE)
 
 def next_image_index(output_dir: str) -> int:
     existing = [
-        int(m.group(1))
-        for f in os.listdir(output_dir)
-        if (m := INDEX_RE.match(f)) is not None
+        int(m.group(1)) for f in os.listdir(output_dir) if (m := INDEX_RE.match(f)) is not None
     ]
     return max(existing, default=0) + 1
 
@@ -98,7 +96,11 @@ def collect_cat_from_video(video_path: str, label: str, interval: float = SAVE_I
                 confidence = float(box.conf[0])
                 class_name = model.names[class_id]
 
-                if class_name == "cat" and confidence >= CONFIDENCE_THRESHOLD and confidence > best_conf:
+                if (
+                    class_name == "cat"
+                    and confidence >= CONFIDENCE_THRESHOLD
+                    and confidence > best_conf
+                ):
                     best_conf = confidence
                     best_cat = box.xyxy[0].cpu().numpy()
 
@@ -128,7 +130,9 @@ def collect_cat_from_video(video_path: str, label: str, interval: float = SAVE_I
         filename = output_dir / f"{saved_count:04d}.jpg"
         cv2.imwrite(str(filename), cat_image)
 
-        print(f"[{saved_count:4d}] saved {filename} (confidence={best_conf:.2f}, frame={frame_index})")
+        print(
+            f"[{saved_count:4d}] saved {filename} (confidence={best_conf:.2f}, frame={frame_index})"
+        )
         frame_index += 1
 
     cap.release()
@@ -145,21 +149,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Collect cat images from a video at a fixed time interval."
     )
+    parser.add_argument("--video", required=True, help="Path to the input video file.")
+    parser.add_argument("--label", required=True, help="Cat label / output subfolder name.")
     parser.add_argument(
-        "--video",
-        required=True,
-        help="Path to the input video file."
-    )
-    parser.add_argument(
-        "--label",
-        required=True,
-        help="Cat label / output subfolder name."
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=SAVE_INTERVAL,
-        help="Seconds between frames to check."
+        "--interval", type=float, default=SAVE_INTERVAL, help="Seconds between frames to check."
     )
     args = parser.parse_args()
 

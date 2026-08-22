@@ -1,5 +1,4 @@
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -29,23 +28,16 @@ def parse_args():
         "--task",
         choices=["identity", "occupancy", "all"],
         default="all",
-        help="Which model(s) to train."
+        help="Which model(s) to train.",
     )
     parser.add_argument(
         "--dataset",
         default=str(Path.cwd() / "dataset" / "processed"),
-        help="Dataset output directory (defaults to ./dataset/processed)."
+        help="Dataset output directory (defaults to ./dataset/processed).",
     )
+    parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation split ratio.")
     parser.add_argument(
-        "--val_ratio",
-        type=float,
-        default=0.2,
-        help="Validation split ratio."
-    )
-    parser.add_argument(
-        "--extra",
-        nargs=argparse.REMAINDER,
-        help="Extra arguments passed to the training script."
+        "--extra", nargs=argparse.REMAINDER, help="Extra arguments passed to the training script."
     )
     return parser.parse_args()
 

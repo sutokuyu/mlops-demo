@@ -1,4 +1,3 @@
-from pathlib import Path
 import random
 import shutil
 import sys
@@ -32,22 +31,20 @@ OUTPUT_DIR = resolve_config_path(CONFIG["paths"]["processed"])
 VAL_RATIO = CONFIG["split"]["val_ratio"]
 RANDOM_SEED = CONFIG["split"]["random_seed"]
 
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp"
-}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 # =========================
 # Split
 # =========================
 
-def split_processed_to_dataset(source_dir: Path = SOURCE_DIR,
-                               output_dir: Path = OUTPUT_DIR,
-                               val_ratio: float = VAL_RATIO,
-                               random_seed: int = RANDOM_SEED):
+
+def split_processed_to_dataset(
+    source_dir: Path = SOURCE_DIR,
+    output_dir: Path = OUTPUT_DIR,
+    val_ratio: float = VAL_RATIO,
+    random_seed: int = RANDOM_SEED,
+):
     """Split images under `source_dir/<class>/` into
     `output_dir/train/<class>/` and `output_dir/val/<class>/`.
     """
@@ -65,7 +62,8 @@ def split_processed_to_dataset(source_dir: Path = SOURCE_DIR,
         source_class_dir = source_dir / class_name
 
         images = [
-            p for p in source_class_dir.iterdir()
+            p
+            for p in source_class_dir.iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
         ]
 

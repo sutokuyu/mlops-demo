@@ -1,5 +1,4 @@
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -21,7 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config_loader import load_config, resolve_config_path
 
-
 CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 config = load_config(CONFIG_PATH)
 
@@ -41,53 +39,47 @@ def parse_args(argv=None):
         "--task",
         choices=["identity", "occupancy", "all"],
         default="all",
-        help="Which model(s) to train."
+        help="Which model(s) to train.",
     )
 
     parser.add_argument(
         "--dataset",
         default=str(PROJECT_ROOT / "dataset" / "processed"),
-        help="Dataset root directory containing train/ and val/."
+        help="Dataset root directory containing train/ and val/.",
     )
 
     parser.add_argument(
         "--epochs",
         type=int,
         default=config["training"]["epochs"],
-        help="Number of training epochs."
+        help="Number of training epochs.",
     )
 
     parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=config["training"]["imgsz"],
-        help="Input image size."
+        "--imgsz", type=int, default=config["training"]["imgsz"], help="Input image size."
     )
 
     parser.add_argument(
-        "--batch",
-        type=int,
-        default=config["training"]["batch"],
-        help="Batch size."
+        "--batch", type=int, default=config["training"]["batch"], help="Batch size."
     )
 
     parser.add_argument(
         "--device",
         default=config["training"]["device"],
-        help="Device to use for training, e.g. 0 or cpu."
+        help="Device to use for training, e.g. 0 or cpu.",
     )
 
     parser.add_argument(
         "--project",
         default=str(resolve_config_path(config["training"]["project_dir"])),
-        help="Output project directory."
+        help="Output project directory.",
     )
 
     parser.add_argument(
         "--exist_ok",
         action="store_true",
         default=config["training"]["exist_ok"],
-        help="Overwrite existing project directory if it exists."
+        help="Overwrite existing project directory if it exists.",
     )
 
     return parser.parse_args(argv)
@@ -124,17 +116,13 @@ def get_split_dirs(dataset_root: Path):
     val_dir = dataset_root / "val"
 
     if not train_dir.is_dir() or not val_dir.is_dir():
-        raise RuntimeError(
-            f"Dataset root must contain train/ and val/ directories: {dataset_root}"
-        )
+        raise RuntimeError(f"Dataset root must contain train/ and val/ directories: {dataset_root}")
 
     return train_dir, val_dir
 
 
 def get_class_names(directory: Path):
-    return sorted(
-        [p.name for p in directory.iterdir() if p.is_dir()]
-    )
+    return sorted([p.name for p in directory.iterdir() if p.is_dir()])
 
 
 def validate_dataset(train_dir: Path, val_dir: Path):
@@ -142,17 +130,13 @@ def validate_dataset(train_dir: Path, val_dir: Path):
     val_classes = set(get_class_names(val_dir))
 
     if EMPTY_CLASS not in train_classes or EMPTY_CLASS not in val_classes:
-        raise RuntimeError(
-            f"Dataset must contain '{EMPTY_CLASS}' in both train/ and val/."
-        )
+        raise RuntimeError(f"Dataset must contain '{EMPTY_CLASS}' in both train/ and val/.")
 
     non_empty_train = train_classes - {EMPTY_CLASS}
     non_empty_val = val_classes - {EMPTY_CLASS}
 
     if not non_empty_train or not non_empty_val:
-        raise RuntimeError(
-            "Dataset must contain at least one non-empty class besides 'empty'."
-        )
+        raise RuntimeError("Dataset must contain at least one non-empty class besides 'empty'.")
 
     missing_identities = set(IDENTITY_CLASSES) - non_empty_train
     if missing_identities:
@@ -182,9 +166,7 @@ def build_identity_dataset(train_dir: Path, val_dir: Path, tmp_root: Path):
         for class_name in IDENTITY_CLASSES:
             src_class_dir = split_dir / class_name
             if not src_class_dir.is_dir():
-                raise RuntimeError(
-                    f"Missing class folder for identity training: {src_class_dir}"
-                )
+                raise RuntimeError(f"Missing class folder for identity training: {src_class_dir}")
             make_symlink_or_copy(src_class_dir, dest_split / class_name)
 
     return identity_root
@@ -202,9 +184,7 @@ def build_occupancy_dataset(train_dir: Path, val_dir: Path, tmp_root: Path):
 
         empty_src = split_dir / EMPTY_CLASS
         if not empty_src.is_dir():
-            raise RuntimeError(
-                f"Missing empty class folder: {empty_src}"
-            )
+            raise RuntimeError(f"Missing empty class folder: {empty_src}")
 
         copy_directory(empty_src, dest_split / EMPTY_CLASS)
 
@@ -220,7 +200,9 @@ def build_occupancy_dataset(train_dir: Path, val_dir: Path, tmp_root: Path):
                 target_name = f"{class_dir.name}_{image_path.name}"
                 target_path = non_empty_dest / target_name
                 if target_path.exists():
-                    target_path = non_empty_dest / f"{class_dir.name}_{image_path.stem}_{image_path.suffix}"
+                    target_path = (
+                        non_empty_dest / f"{class_dir.name}_{image_path.stem}_{image_path.suffix}"
+                    )
                 try:
                     target_path.symlink_to(image_path.resolve())
                 except OSError:

@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+# E501: handled by ruff-format; E402: scripts intentionally insert sys.path before local imports
+# UP038: isinstance with tuple is preferred over PEP 604 union (faster, more common)
+ignore = ["E501", "E402", "UP038"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
