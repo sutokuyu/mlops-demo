@@ -38,6 +38,22 @@ collect:
   min_box_height: 80
   padding: 20
 
+identity_collection:
+  confidence_threshold: 0.20
+  inference_interval_seconds: 5.0
+  background_sample_interval_seconds: 15.0
+  max_background_samples_per_camera: 0
+  imgsz: 640
+  reconnect_interval_seconds: 5.0
+  output_dir: dataset/identity_detection_candidates
+  cameras:
+    - name: living_room
+      rtsp_url: ${LIVING_ROOM_RTSP_URL:}
+    - name: sofa
+      rtsp_url: ${SOFA_RTSP_URL:}
+    - name: feeder
+      rtsp_url: ${FEEDER_RTSP_URL:}
+
 split:
   val_ratio: 0.2
   random_seed: 42
