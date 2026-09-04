@@ -14,6 +14,7 @@ models:
   detection_model: yolo11n.pt
   classification_model: yolo11n-cls.pt
   identity_model_path: models/cat_classifier/identity/weights/best.pt
+  identity_detection_model_path: models/cat_identity_detection/weights/best.pt
   occupancy_model_path: models/cat_classifier/occupancy/weights/best.pt
 
 camera:
@@ -48,6 +49,12 @@ training:
   device: 0
   project_dir: models/cat_classifier
   exist_ok: false
+  identity_detection_dataset: dataset/cat_identity_detection/data.yaml
+  identity_detection_epochs: 50
+  identity_detection_imgsz: 640
+  identity_detection_batch: -1
+  identity_detection_project_dir: models
+  identity_detection_run_name: cat_identity_detection
 
 monitoring:
   detection_confidence: 0.40
