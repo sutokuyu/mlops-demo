@@ -23,6 +23,11 @@ def parse_args(argv=None):
         action="store_true",
         help="Print the split plan without moving any files.",
     )
+    parser.add_argument(
+        "--allow-missing-labels",
+        action="store_true",
+        help="Treat images without labels as background and create empty label files.",
+    )
     return parser.parse_args(argv)
 
 
@@ -45,18 +50,24 @@ def _split_group(images: list[Path], train_ratio: float, val_ratio: float) -> di
     }
 
 
-def plan_split(dataset_root: Path, train_ratio: float, val_ratio: float):
+def plan_split(
+    dataset_root: Path,
+    train_ratio: float,
+    val_ratio: float,
+    allow_missing_labels: bool = False,
+):
     images_dir = dataset_root / "images"
+    source_images_dir = images_dir / "train" if (images_dir / "train").is_dir() else images_dir
     labels_dir = dataset_root / "labels" / "train"
-    if not images_dir.is_dir() or not labels_dir.is_dir():
+    if not source_images_dir.is_dir() or not labels_dir.is_dir():
         raise RuntimeError("Dataset must contain images/ and labels/train/ directories.")
 
     images_by_group = defaultdict(list)
     skipped_images = []
-    for image_path in sorted(images_dir.iterdir()):
+    for image_path in sorted(source_images_dir.iterdir()):
         if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
-        if (labels_dir / f"{image_path.stem}.txt").is_file():
+        if allow_missing_labels or (labels_dir / f"{image_path.stem}.txt").is_file():
             images_by_group[_source_group(image_path)].append(image_path)
         else:
             skipped_images.append(image_path)
@@ -76,10 +87,14 @@ def print_summary(splits: dict[str, list[Path]], skipped_images: list[Path]) -> 
 
 
 def apply_split(
-    dataset_root: Path, splits: dict[str, list[Path]], skipped_images: list[Path]
+    dataset_root: Path,
+    splits: dict[str, list[Path]],
+    skipped_images: list[Path],
+    allow_missing_labels: bool = False,
 ) -> None:
     images_dir = dataset_root / "images"
     labels_dir = dataset_root / "labels"
+    source_images_dir = images_dir / "train" if (images_dir / "train").is_dir() else images_dir
     source_labels_dir = labels_dir / "train"
     staging_labels_dir = labels_dir / "all"
     if staging_labels_dir.exists():
@@ -92,12 +107,18 @@ def apply_split(
         for split_name, images in splits.items():
             split_images_dir = images_dir / split_name
             split_labels_dir = labels_dir / split_name
-            split_images_dir.mkdir()
+            split_images_dir.mkdir(exist_ok=True)
             split_labels_dir.mkdir()
             for image_path in images:
                 label_path = staging_labels_dir / f"{image_path.stem}.txt"
-                shutil.move(image_path, split_images_dir / image_path.name)
-                shutil.move(label_path, split_labels_dir / label_path.name)
+                if split_images_dir != source_images_dir:
+                    shutil.move(image_path, split_images_dir / image_path.name)
+                if label_path.is_file():
+                    shutil.move(label_path, split_labels_dir / label_path.name)
+                elif allow_missing_labels:
+                    (split_labels_dir / label_path.name).touch()
+                else:
+                    raise RuntimeError(f"Missing label for image: {image_path}")
 
         skipped_dir = images_dir / "skipped"
         skipped_dir.mkdir()
@@ -111,11 +132,25 @@ def apply_split(
 def main(argv=None):
     args = parse_args(argv)
     _validate_ratios(args.train_ratio, args.val_ratio)
-    splits, skipped_images = plan_split(args.dataset, args.train_ratio, args.val_ratio)
+    dataset_root = args.dataset
+    split_directories = (
+        dataset_root / "images" / "val",
+        dataset_root / "images" / "test",
+        dataset_root / "labels" / "val",
+        dataset_root / "labels" / "test",
+    )
+    if all(directory.is_dir() for directory in split_directories):
+        raise RuntimeError(
+            f"Dataset is already split into train/val/test: {dataset_root}. "
+            "Do not run the splitter again on this dataset."
+        )
+    splits, skipped_images = plan_split(
+        args.dataset, args.train_ratio, args.val_ratio, args.allow_missing_labels
+    )
     print_summary(splits, skipped_images)
     if args.dry_run:
         return
-    apply_split(args.dataset, splits, skipped_images)
+    apply_split(args.dataset, splits, skipped_images, args.allow_missing_labels)
 
 
 if __name__ == "__main__":

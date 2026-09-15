@@ -1,9 +1,14 @@
 import argparse
+import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from pathlib import Path
+
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 import cv2
 from ultralytics import YOLO
@@ -34,6 +39,11 @@ class CameraState:
     name: str
     rtsp_url: str
     capture: cv2.VideoCapture | None = None
+    latest_frame = None
+    frame_lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
+    reader_thread: threading.Thread | None = None
+    reader_stop_event: threading.Event = dataclass_field(default_factory=threading.Event)
+    last_frame_at: float = 0.0
     last_inference_at: float = 0.0
     last_sample_at: float = 0.0
     last_connect_attempt_at: float = 0.0
@@ -56,6 +66,12 @@ def parse_args(argv=None):
         "--output-dir",
         type=Path,
         default=resolve_config_path(COLLECTION_CONFIG["output_dir"]),
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=IDENTITY_MODEL_PATH,
+        help="Identity detection weights; defaults to the configured model path.",
     )
     parser.add_argument("--conf", type=float, default=COLLECTION_CONFIG["confidence_threshold"])
     parser.add_argument(
@@ -95,6 +111,15 @@ def parse_args(argv=None):
             "IoU or higher; set to 0 to disable duplicate suppression."
         ),
     )
+    parser.add_argument(
+        "--cross-class-iou-threshold",
+        type=float,
+        default=0.90,
+        help=(
+            "When the kept bagel and kurumi boxes overlap at this IoU or higher, only keep "
+            "the higher-confidence box; set to 0 to disable this check."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -114,17 +139,56 @@ def select_cameras(camera_names: list[str] | None) -> list[CameraState]:
     return cameras
 
 
+def _reader_loop(camera: CameraState) -> None:
+    """Continuously read RTSP frames and keep only the newest frame."""
+    while not camera.reader_stop_event.is_set():
+        capture = camera.capture
+        if capture is None:
+            break
+
+        ok, frame = capture.read()
+        if not ok:
+            if not camera.reader_stop_event.is_set():
+                print(f"[{camera.name}] lost stream; reader stopped")
+            break
+
+        with camera.frame_lock:
+            camera.latest_frame = frame
+            camera.last_frame_at = time.monotonic()
+
+
 def connect(camera: CameraState) -> None:
     camera.last_connect_attempt_at = time.monotonic()
+
+    # Stop any previous reader before replacing the capture.
+    camera.reader_stop_event.set()
+    if camera.reader_thread is not None and camera.reader_thread.is_alive():
+        camera.reader_thread.join(timeout=1.0)
+
     if camera.capture is not None:
         camera.capture.release()
+
     camera.capture = cv2.VideoCapture(camera.rtsp_url, cv2.CAP_FFMPEG)
-    if camera.capture.isOpened():
-        print(f"[{camera.name}] connected")
-    else:
+    if not camera.capture.isOpened():
         camera.capture.release()
         camera.capture = None
         print(f"[{camera.name}] unable to connect; will retry")
+        return
+
+    with camera.frame_lock:
+        camera.latest_frame = None
+        camera.last_frame_at = 0.0
+
+    camera.reader_stop_event = threading.Event()
+    camera.reader_thread = threading.Thread(
+        target=_reader_loop,
+        args=(camera,),
+        name=f"rtsp-reader-{camera.name}",
+        daemon=True,
+    )
+    camera.reader_thread.start()
+
+    print(f"[{camera.name}] connected")
 
 
 def xyxy_to_yolo(box, image_width: int, image_height: int) -> tuple[float, float, float, float]:
@@ -175,6 +239,35 @@ def is_duplicate_detection(
     return True
 
 
+def select_best_per_class_boxes(
+    result, confidence_threshold: float, cross_class_iou_threshold: float
+) -> list[int]:
+    # Only one cat is ever in frame, so keep at most one box per identity class.
+    best_index_by_class: dict[int, tuple[float, int]] = {}
+    for box_index, box in enumerate(result.boxes or []):
+        class_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+        if class_id not in EXPECTED_CLASSES or confidence < confidence_threshold:
+            continue
+        current_best = best_index_by_class.get(class_id)
+        if current_best is None or confidence > current_best[0]:
+            best_index_by_class[class_id] = (confidence, box_index)
+
+    # The same cat is sometimes double-detected as both identities; when the
+    # kept boxes for each class overlap heavily, only keep the higher-confidence one.
+    if len(best_index_by_class) == 2:
+        class_ids = list(best_index_by_class)
+        first_conf, first_index = best_index_by_class[class_ids[0]]
+        second_conf, second_index = best_index_by_class[class_ids[1]]
+        first_box = tuple(float(value) for value in result.boxes[first_index].xyxy[0])
+        second_box = tuple(float(value) for value in result.boxes[second_index].xyxy[0])
+        if box_iou(first_box, second_box) >= cross_class_iou_threshold:
+            worse_class_id = class_ids[0] if first_conf < second_conf else class_ids[1]
+            del best_index_by_class[worse_class_id]
+
+    return [box_index for _, box_index in best_index_by_class.values()]
+
+
 def save_detection(
     camera: CameraState,
     frame,
@@ -182,18 +275,18 @@ def save_detection(
     output_dir: Path,
     confidence_threshold: float,
     duplicate_iou_threshold: float,
+    cross_class_iou_threshold: float,
 ) -> bool:
     image_height, image_width = frame.shape[:2]
+    box_indices = select_best_per_class_boxes(
+        result, confidence_threshold, cross_class_iou_threshold
+    )
     label_rows = []
-    box_indices = []
-    for box_index, box in enumerate(result.boxes or []):
+    for box_index in box_indices:
+        box = result.boxes[box_index]
         class_id = int(box.cls[0])
-        confidence = float(box.conf[0])
-        if class_id not in EXPECTED_CLASSES or confidence < confidence_threshold:
-            continue
         values = xyxy_to_yolo(box.xyxy[0].tolist(), image_width, image_height)
         label_rows.append(f"{class_id} " + " ".join(f"{value:.6f}" for value in values))
-        box_indices.append(box_index)
 
     if not label_rows:
         return False
@@ -250,8 +343,8 @@ def save_raw_sample(camera: CameraState, frame, output_dir: Path) -> None:
 
 
 def collect(args) -> None:
-    if not IDENTITY_MODEL_PATH.is_file():
-        raise FileNotFoundError(f"Identity detection model not found: {IDENTITY_MODEL_PATH}")
+    if not args.model.is_file():
+        raise FileNotFoundError(f"Identity detection model not found: {args.model}")
     if not 0.0 <= args.conf <= 1.0:
         raise ValueError("--conf must be between 0 and 1")
     if args.inference_interval <= 0:
@@ -262,9 +355,11 @@ def collect(args) -> None:
         raise ValueError("--max-background-samples-per-camera must be 0 or greater")
     if not 0.0 <= args.duplicate_iou_threshold <= 1.0:
         raise ValueError("--duplicate-iou-threshold must be between 0 and 1")
+    if not 0.0 <= args.cross_class_iou_threshold <= 1.0:
+        raise ValueError("--cross-class-iou-threshold must be between 0 and 1")
 
     cameras = select_cameras(args.camera_names)
-    model = YOLO(str(IDENTITY_MODEL_PATH))
+    model = YOLO(str(args.model))
     if model.names != EXPECTED_CLASSES:
         raise RuntimeError(f"Model classes must be {EXPECTED_CLASSES}, but found {model.names}")
 
@@ -282,13 +377,24 @@ def collect(args) -> None:
                         connect(camera)
                     continue
 
-                ok, frame = camera.capture.read()
-                if not ok:
-                    print(f"[{camera.name}] lost stream; reconnecting")
-                    camera.capture.release()
+                # The reader thread continuously drains RTSP and keeps only the newest frame.
+                with camera.frame_lock:
+                    frame = None if camera.latest_frame is None else camera.latest_frame.copy()
+
+                if frame is None:
+                    # The reader may still be connecting/decoding its first frame.
+                    continue
+
+                active_cameras += 1
+
+                # If the reader thread stopped, reconnect on the next pass.
+                if camera.reader_thread is not None and not camera.reader_thread.is_alive():
+                    print(f"[{camera.name}] reader stopped; reconnecting")
+                    camera.reader_stop_event.set()
+                    if camera.capture is not None:
+                        camera.capture.release()
                     camera.capture = None
                     continue
-                active_cameras += 1
 
                 background_sample_due = (
                     args.background_sample_interval
@@ -312,6 +418,7 @@ def collect(args) -> None:
                     args.output_dir,
                     args.conf,
                     args.duplicate_iou_threshold,
+                    args.cross_class_iou_threshold,
                 )
                 # A due background-sampling window must be consumed even when an
                 # identity is detected.  Otherwise it remains due and bypasses
@@ -332,6 +439,11 @@ def collect(args) -> None:
         print("Collection stopped.")
     finally:
         for camera in cameras:
+            camera.reader_stop_event.set()
+
+        for camera in cameras:
+            if camera.reader_thread is not None and camera.reader_thread.is_alive():
+                camera.reader_thread.join(timeout=1.0)
             if camera.capture is not None:
                 camera.capture.release()
 
