@@ -11,25 +11,15 @@ paths:
   temp_training_data: tmp_training_data
 
 models:
-  detection_model: yolo11n.pt
-  classification_model: yolo11n-cls.pt
-  identity_model_path: models/cat_classifier/identity/weights/best.pt
-  identity_detection_model_path: models/cat_identity_detection/weights/best.pt
-  occupancy_model_path: models/cat_classifier/occupancy/weights/best.pt
+  identity_detection_model_path: models/cat_identity_detection_yolo26n_combined_third/weights/best.pt
 
 camera:
   rtsp_url: rtsp://<username>:<password>@<ip>:<port>/h264/ch1/main/av_stream
 
 cats:
-  detection_class: cat
   identity_classes:
-    - cat_a
-    - cat_b
-  identity_unknown_label: UNKNOWN
-  occupancy_empty_class: empty
-  occupancy_classes:
-    - empty
-    - non-empty
+    - bagel
+    - kurumi
 
 collect:
   confidence_threshold: 0.70
