@@ -27,7 +27,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, resolve_config_path
+from src.config_loader import load_config
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 COLLECTION_CONFIG = CONFIG["identity_collection"]
@@ -137,7 +137,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=Path,
-        default=resolve_config_path(CONFIG["models"]["detection_model"]),
         help="YOLO weights to run for detection.",
     )
     parser.add_argument("--conf", type=float, default=0.40, help="Confidence threshold.")

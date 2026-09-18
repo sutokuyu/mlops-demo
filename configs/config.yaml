@@ -11,7 +11,7 @@ paths:
   temp_training_data: tmp_training_data
 
 models:
-  identity_detection_model_path: models/cat_identity_detection_yolo26n_combined_third/weights/best.pt
+  identity_detection_model_path: models/cat_identity_detection_yolo26n_4/weights/best.pt
 
 camera:
   rtsp_url: rtsp://<username>:<password>@<ip>:<port>/h264/ch1/main/av_stream
@@ -31,7 +31,7 @@ collect:
 identity_collection:
   confidence_threshold: 0.20
   inference_interval_seconds: 5.0
-  background_sample_interval_seconds: 15.0
+  background_sample_interval_seconds: 0
   max_background_samples_per_camera: 0
   imgsz: 640
   reconnect_interval_seconds: 5.0
@@ -50,12 +50,12 @@ split:
 
 training:
   epochs: 50
-  imgsz: 224
-  batch: 16
+  imgsz: 640
+  batch: -1
   device: 0
   project_dir: models/cat_classifier
   exist_ok: false
-  identity_detection_dataset: dataset/cat_identity_detection/data.yaml
+  identity_detection_dataset: dataset/data.yaml
   identity_detection_epochs: 50
   identity_detection_imgsz: 640
   identity_detection_batch: -1

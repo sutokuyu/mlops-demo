@@ -36,7 +36,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--model",
-        default=CONFIG["models"]["detection_model"],
+        type=Path,
         help="Pretrained YOLO detection weights or model name.",
     )
     parser.add_argument(
@@ -63,7 +63,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--name",
-        default=TRAINING_CONFIG["identity_detection_run_name"],
+        type=str,
+        help="Name of the training run.",
     )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
