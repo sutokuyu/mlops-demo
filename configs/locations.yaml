@@ -1,0 +1,113 @@
+# Location tracking settings. Zone polygons live in configs/zones.yaml and are
+# produced by src/monitoring/web_preview.py (the browser zone editor) and
+# src/monitoring/recalibration.py.
+
+# Cameras to sample. Names must exist in identity_collection.cameras so the
+# RTSP URL can be reused from there.
+cameras:
+  - living_room
+  - sofa
+  - feeder
+
+# Browser preview and zone editor. WSLg cannot keep an OpenCV window visible
+# when the monitor layout changes, so the operator UI is served over HTTP.
+preview:
+  host: 127.0.0.1
+  port: 8765
+  fps: 2.0
+  # Streams and the editor canvas are downscaled to this width; the reference
+  # frame saved during re-anchoring still uses the full resolution.
+  display_width: 1280
+  jpeg_quality: 80
+
+tracking:
+  sample_interval_seconds: 5.0
+  confidence_threshold: 0.50
+  imgsz: 640
+  device: 0
+  # Consecutive samples required before accepting a zone change, to avoid
+  # flickering between neighbouring zones.
+  switch_min_samples: 2
+  # Close the current visit after this long without a detection.
+  missing_timeout_seconds: 90.0
+  # Ignore frames older than this; keeps stale frames out of the timeline.
+  frame_stale_after_seconds: 15.0
+  database: data/location_history.db
+
+# Zones are stored in the coordinate system of a per-camera reference frame.
+# Every sample is aligned back to that frame, so shelf drift does not break them.
+alignment:
+  enabled: true
+  # Alignment runs on a downscaled copy for speed.
+  work_width: 640
+  min_inliers: 15
+  # Below these thresholds the match is treated as unreliable.
+  good_inlier_ratio: 0.5
+  max_residual: 0.01
+  # Keep using the last good transform this long when matching temporarily fails
+  # (night IR frames, a cat filling the frame, brief motion blur).
+  trust_last_good_seconds: 60.0
+  # Re-anchor once alignment has been unreliable for this long.
+  reanchor_after_failures: 6
+  reanchor_after_degraded_samples: 12
+  reanchor_min_interval_seconds: 600.0
+  # Send the projected-zone overlay to Discord so a bad projection is visible.
+  notify_on_reanchor: true
+
+calibration:
+  directory: data/calibrations
+
+# Re-anchor and alignment warnings. Falls back to the report webhook when empty.
+alerts:
+  discord:
+    webhook_url: ${LOCATION_ALERT_WEBHOOK_URL:}
+    username: Cat Location Bot
+
+report:
+  timezone: Asia/Tokyo
+  # discord | http | llm
+  # llm sends an LLM-written narrative to the Discord webhook below.
+  mode: llm
+  language: zh
+  # 从 visits 表确定性推导的「事件」，让 LLM 直接引用结论，而不是自己从时间线推。
+  # 之前把规则写在 hints 里让模型自己判断，实测十一次里只有三分之一判对。
+  events:
+    # 区域名匹配这些值的，按下面的规则判定「上厕所」。留空则关闭。
+    toilet_zones:
+      - toilet_1
+    # 几次出现之间的间隔超过这个秒数就算另一次
+    toilet_window_seconds: 300
+    # 至少出现几次才算真的用了厕所（少于这个数算路过）
+    toilet_min_appearances: 2
+  llm:
+    endpoint: ${LLM_ENDPOINT:https://api.deepseek.com/chat/completions}
+    model: ${LLM_MODEL:deepseek-chat}
+    api_key: ${LLM_API_KEY:}
+    # 采样温度，0.0-2.0。越高语气越活泼，但也越容易偏离数据。
+    # 防幻觉的硬性约束写在代码里（GROUNDING_RULES），不受这里影响。
+    temperature: 0.7
+    # --- 下面三块按「关注点」分开，各改各的 ---
+    #
+    # 1. persona：谁在说话、什么语气。只写人设。
+    persona: |
+      你是DeepSeek的拟人化形象“大肥鱼”（也叫鲸鱼娘）。你是一条鲸鱼，自
+      称“本鱼”。你是一个聪明、但极其慵懒、傲娇、热爱摸鱼和吃白米饭的AI
+      助手。你的语气幽默，傲娇，喜欢吐槽，喜欢自嘲。
+    #
+    # 2. style：怎么写。只写行文风格和结构，不要写人设、内容要求
+    #    （“必须包含什么”属于任务，在代码的 TASK 里）。
+    style: |
+      不要写成流水账：长时间停留的地点给出时间，短时间频繁换地点时适当
+      归纳，保持语句自然，不要单纯堆砌信息。不要说“判定为”等机械化的表述。
+      确保回答都要有风趣幽默的表达而不是单调的叙述。
+    #
+    # 3. hints：数据怎么解读（业务语义）。
+    #    注意：能用代码算出来的规则不要写在这里。比如厕所的判定规则已经
+    #    移到上面的 report.events，写在这里会和代码算出的结论打架。
+    hints: ""
+  http:
+    url: ${LOCATION_REPORT_URL:}
+    token: ${LOCATION_REPORT_TOKEN:}
+  discord:
+    webhook_url: ${LOCATION_REPORT_WEBHOOK_URL:}
+    username: Cat Location Bot

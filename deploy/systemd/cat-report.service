@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cat location summary sent to Discord
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/mlops-demo
+# daily_report.sh sources .env itself, so the LLM key and the webhook are not
+# copied into this file. It defaults to --days-ago 1, which is the day that just
+# ended when the timer fires at midnight.
+ExecStart=%h/projects/mlops-demo/scripts/daily_report.sh

@@ -1,4 +1,3 @@
-import runpy
 import sys
 from pathlib import Path
 
@@ -15,11 +14,8 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-def main():
-    print("Starting toilet monitor...")
-    runpy.run_module("src.monitoring.toilet_monitor", run_name="__main__")
-
+from src.monitoring.location_tracker import main
 
 if __name__ == "__main__":
+    print("Starting cat location tracker...")
     main()

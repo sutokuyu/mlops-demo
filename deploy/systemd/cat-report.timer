@@ -1,0 +1,19 @@
+[Unit]
+Description=Send the cat report just after midnight
+
+[Timer]
+# The report summarizes the day that just ended, so it fires on the boundary
+# between the two days. The tracker writes with WAL and commits every sample, so
+# the report only has to read - it does not need the tracker stopped.
+OnCalendar=*-*-* 00:00:00
+# Spread the start over the first half minute. That is well past the last sample
+# of the previous day, and keeps the timer from racing the tracker's own write
+# when both land on the same second.
+RandomizedDelaySec=30
+# A laptop is usually asleep at midnight. Catch up on the next wake instead of
+# silently skipping the day.
+Persistent=true
+Unit=cat-report.service
+
+[Install]
+WantedBy=timers.target

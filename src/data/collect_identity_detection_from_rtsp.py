@@ -99,7 +99,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--max-images-per-camera",
         type=int,
-        default=0,
+        default=COLLECTION_CONFIG["max_images_per_camera"],
         help="Stop after this many saved images per camera; 0 means run until interrupted.",
     )
     parser.add_argument(

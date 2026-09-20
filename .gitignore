@@ -15,3 +15,7 @@ __pycache__/
 my_config.yaml
 /models
 /dataset
+
+# Local secrets: LLM key, Discord webhooks. Never commit.
+.env
+.env.*
