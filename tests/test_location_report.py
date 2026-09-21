@@ -20,9 +20,11 @@ from src.monitoring.location_report import (
     DEFAULT_TEMPERATURE,
     EVENTS,
     GROUNDING_RULES,
+    MAX_QUESTION_CHARACTERS,
     MAX_REPORT_CHARACTERS,
     NEUTRAL_PERSONA,
     PRESENTATION,
+    QUESTION,
     TASK,
     DeliveryError,
     build_instruction,
@@ -277,9 +279,35 @@ def test_call_llm_honours_a_temperature_override(monkeypatch) -> None:
     assert captured["body"]["temperature"] == pytest.approx(1.2)
 
 
+def test_call_llm_puts_the_question_in_the_instruction(monkeypatch) -> None:
+    """The Discord bot hands the owner's own words to the model."""
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    call_llm({"cats": []}, question="bagel 今天在沙发上待了多久？")
+    instruction = captured["body"]["messages"][0]["content"]
+    assert "bagel 今天在沙发上待了多久？" in instruction
+    # The data is still the only source, whatever was asked.
+    assert instruction.rstrip().endswith(GROUNDING_RULES)
+    # The question never reaches the user message, which stays pure data.
+    assert captured["body"]["messages"][1]["content"] == '{"cats": []}'
+
+
 def test_compose_returns_the_llm_narrative_in_llm_mode(monkeypatch) -> None:
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
-    monkeypatch.setattr(location_report, "call_llm", lambda summary, temperature=None: "喵喵喵")
+    monkeypatch.setattr(
+        location_report, "call_llm", lambda summary, temperature=None, question=None: "喵喵喵"
+    )
     assert location_report.compose({"cats": []}, "plain text") == "喵喵喵"
 
 
@@ -288,7 +316,7 @@ def test_compose_returns_the_plain_text_in_discord_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None: pytest.fail("the LLM must not be called"),
+        lambda summary, temperature=None, question=None: pytest.fail("the LLM must not be called"),
     )
     assert location_report.compose({"cats": []}, "plain text") == "plain text"
 
@@ -296,7 +324,9 @@ def test_compose_returns_the_plain_text_in_discord_mode(monkeypatch) -> None:
 def test_dry_run_posts_nothing(monkeypatch, capsys) -> None:
     """--dry-run is how the persona gets tuned without spamming Discord."""
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
-    monkeypatch.setattr(location_report, "call_llm", lambda summary, temperature=None: "喵")
+    monkeypatch.setattr(
+        location_report, "call_llm", lambda summary, temperature=None, question=None: "喵"
+    )
     monkeypatch.setattr(
         location_report,
         "send_to_discord",
@@ -359,6 +389,29 @@ def test_build_summary_clips_visits_that_span_midnight(tmp_path: Path) -> None:
         {"location": "on_sofa", "minutes": 20.0},
         {"location": "carpet", "minutes": 5.0},
     ]
+
+
+def test_the_question_block_only_appears_when_asked() -> None:
+    """The daily report must not gain a block just because the bot exists."""
+    assert QUESTION.format(question="Q-MARKER") not in build_instruction("zh")
+    assert "Q-MARKER" in build_instruction("zh", question="Q-MARKER")
+    # A blank or whitespace-only message is not a question.
+    assert build_instruction("zh", question="   ") == build_instruction("zh")
+
+
+def test_the_question_keeps_the_fixed_requirements_and_the_grounding_rules() -> None:
+    instruction = build_instruction("zh", persona="P", question="Q")
+    for required in (TASK, EVENTS, GROUNDING_RULES):
+        assert required in instruction
+    assert instruction.index(TASK) < instruction.index("Q")
+    assert instruction.rstrip().endswith(GROUNDING_RULES)
+
+
+def test_a_long_question_is_capped() -> None:
+    """User text sits inside the system prompt, so it cannot push the rules out."""
+    instruction = build_instruction("zh", question="x" * (MAX_QUESTION_CHARACTERS + 500))
+    assert "x" * MAX_QUESTION_CHARACTERS in instruction
+    assert "x" * (MAX_QUESTION_CHARACTERS + 1) not in instruction
 
 
 # --- toilet verdict ---------------------------------------------------------
