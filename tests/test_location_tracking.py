@@ -39,18 +39,82 @@ class FakeReader:
         return self.frame
 
 
-def test_reanchor_failures_are_reported_once_until_a_success(monkeypatch) -> None:
-    """A camera that cannot be re-anchored must not alert on every retry.
+@pytest.fixture
+def trigger_config(monkeypatch):
+    """A controlled re-anchor config, so these tests do not read locations.yaml."""
+    config = {
+        "reanchor_trigger": "displacement",
+        "reanchor_after_displacement_samples": 3,
+        "reanchor_after_failures": 6,
+        "reanchor_after_degraded_samples": 12,
+        "reanchor_min_interval_seconds": 600.0,
+    }
+    monkeypatch.setattr(location_tracker, "ALIGNMENT_CONFIG", config)
+    return config
 
-    Retrying is still worth it - the lighting may swing back - so only the first
-    failure of a streak notifies, and a success re-arms the alert.
-    """
-    tracker = location_tracker.CameraTracker(
+
+def a_tracker(alignment) -> location_tracker.CameraTracker:
+    return location_tracker.CameraTracker(
         name="sofa",
         rtsp_url="rtsp://example/stream",
         calibration=Calibration(camera="sofa", zones=[SOFA], calibration_id="sofa-1"),
-        alignment=AlignmentTracker(camera="sofa", consecutive_failures=6),
+        alignment=alignment,
     )
+
+
+def test_a_collapsed_match_does_not_ask_for_a_reanchor(trigger_config) -> None:
+    """The old trigger waited for matching to fail, which guaranteed failure.
+
+    Re-anchoring puts the zones onto a new frame by matching against the old
+    reference, so it needs the very match that just collapsed. On these cameras a
+    collapse means the light changed - not that anything moved - so those retries
+    could never succeed. The log bears it out: a whole day of "automatic re-anchor
+    failed: only N feature matches" every ten minutes, and not one success.
+    """
+    tracker = a_tracker(AlignmentTracker(camera="sofa", consecutive_failures=99))
+
+    assert location_tracker.reanchor_reason(tracker) is None
+
+
+def test_a_large_transform_asks_for_a_reanchor(trigger_config) -> None:
+    alignment = AlignmentTracker(camera="sofa", displacement_streak=2)
+    tracker = a_tracker(alignment)
+
+    assert location_tracker.reanchor_reason(tracker) is None, "two samples is not a move yet"
+
+    alignment.displacement_streak = 3
+    alignment.last_magnitude = (0.081, 2.4, 0.011)
+    reason = location_tracker.reanchor_reason(tracker)
+
+    assert reason is not None
+    assert "shift 0.081" in reason, "the log line has to say how big the move was"
+
+
+def test_the_two_older_trigger_modes_are_still_available(trigger_config) -> None:
+    tracker = a_tracker(AlignmentTracker(camera="sofa", consecutive_failures=99))
+    tracker.degraded_streak = 99
+
+    assert location_tracker.reanchor_reason(tracker) is None, "not in displacement mode"
+
+    trigger_config["reanchor_trigger"] = "failures"
+    assert "99 consecutive failed" in location_tracker.reanchor_reason(tracker)
+
+    trigger_config["reanchor_trigger"] = "degraded"
+    assert "99 consecutive samples" in location_tracker.reanchor_reason(tracker)
+
+
+def test_a_camera_without_alignment_is_never_reanchored(trigger_config) -> None:
+    assert location_tracker.reanchor_reason(a_tracker(None)) is None
+
+
+def test_reanchor_failures_are_reported_once_until_a_success(trigger_config, monkeypatch) -> None:
+    """A camera that cannot be re-anchored must not alert on every retry.
+
+    Retrying is still worth it - the camera may be nudged back, or the match may
+    recover once the light settles - so only the first failure of a streak notifies,
+    and a success re-arms the alert.
+    """
+    tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
     tracker.reader = FakeReader(object())
 
     asked_to_notify_on_failure: list[bool] = []
@@ -59,31 +123,32 @@ def test_reanchor_failures_are_reported_once_until_a_success(monkeypatch) -> Non
         asked_to_notify_on_failure.append(notify_on_failure)
         return ReanchorOutcome(False, None, "automatic re-anchor failed", None)
 
+    def succeed(calibration, frame, settings, now=None, notify_on_failure=True):
+        asked_to_notify_on_failure.append(notify_on_failure)
+        return ReanchorOutcome(True, calibration, "projected", None)
+
     monkeypatch.setattr(location_tracker, "reanchor", failing_reanchor)
     monkeypatch.setattr(location_tracker, "reference_features_for", lambda *args: None)
     settings = {"work_width": 640}
 
-    tracker.alignment.consecutive_failures = 6
+    tracker.alignment.displacement_streak = 3
     location_tracker.maybe_reanchor(tracker, 1000.0, settings)
     assert asked_to_notify_on_failure == [True], "the first failure is news"
     assert tracker.reanchor_failure_reported
 
-    tracker.alignment.consecutive_failures = 6
+    tracker.alignment.displacement_streak = 3
     location_tracker.maybe_reanchor(tracker, 5000.0, settings)
     assert asked_to_notify_on_failure == [True, False], "the next retry is not"
 
-    def succeeding_reanchor(calibration, frame, settings, now=None, notify_on_failure=True):
-        asked_to_notify_on_failure.append(notify_on_failure)
-        return ReanchorOutcome(True, calibration, "projected", None)
-
-    monkeypatch.setattr(location_tracker, "reanchor", succeeding_reanchor)
-    tracker.alignment.consecutive_failures = 6
+    monkeypatch.setattr(location_tracker, "reanchor", succeed)
+    tracker.alignment.displacement_streak = 3
     location_tracker.maybe_reanchor(tracker, 9000.0, settings)
     # The success still notifies inside reanchor() - the flag only ever gates
     # failures - and it re-arms the alert for the next genuine failure.
     assert not tracker.reanchor_failure_reported, "a success re-arms the alert"
 
-    tracker.alignment.consecutive_failures = 6
+    monkeypatch.setattr(location_tracker, "reanchor", failing_reanchor)
+    tracker.alignment.displacement_streak = 3
     location_tracker.maybe_reanchor(tracker, 20000.0, settings)
     assert asked_to_notify_on_failure[-1] is True, "so the next failure is news again"
 

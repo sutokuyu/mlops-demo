@@ -71,9 +71,28 @@ alignment:
   #               这些样本的 alignment_quality 仍记为 failed，事后可以筛掉。
   #   skip      - 保持旧行为，宁可 zone 为空。
   on_alignment_failure: use_frame
-  # Re-anchor once alignment has been unreliable for this long.
-  reanchor_after_failures: 6
+  # 什么时候重新锚定：把区域投影到一帧新画面上，并把它当作新的参考帧。
+  # 触发条件必须能证明「相机真的动了」，因为只有位移是重锚能修的东西。
+  # ORB 对旋转和平移不变，相机被碰歪时照样能匹配出一大堆点、只是变换量变大；
+  # 而光照变化会让匹配对直接塌掉（failed、没有矩阵）。所以「变换很大」是位移
+  # 证据，「失败」不是 —— 旧实现正好反过来：living_room 和 feeder 一整天每 10
+  # 分钟试一次重锚、每一次都失败，因为重锚需要的正是那个已经失败的匹配。
+  #
+  #   displacement - 匹配仍然可用，但变换连续若干次超过下面的阈值。默认。
+  #                  趁还能匹配的时候动手，才有可能成功。
+  #   degraded     - 连续若干次低于 good 档位，不管变换多大。
+  #   failures     - 旧的「连续 failed N 次」。留给别的房间用。
+  reanchor_trigger: displacement
+  reanchor_after_displacement_samples: 3
   reanchor_after_degraded_samples: 12
+  reanchor_after_failures: 6
+  # 上面三个数字的判据。不是拍的，是量出来的：把每台相机存下来的参考帧两两
+  # 互配（28/21/36 对，跨 22:00 夜间和 11:00 白天，而相机没人碰过），纯光照
+  # 变化最多只能造出 shift 0.019 / 旋转 0.47° / 缩放 0.005 的变换，而且 5/21
+  # 和 9/36 的对直接匹配失败；真实的碰歪比这些要大一个数量级。
+  reanchor_min_shift: 0.04
+  reanchor_min_rotation_deg: 1.0
+  reanchor_min_scale_delta: 0.02
   reanchor_min_interval_seconds: 600.0
   # Send the projected-zone overlay to Discord so a bad projection is visible.
   notify_on_reanchor: true

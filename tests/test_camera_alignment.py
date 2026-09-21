@@ -1,5 +1,6 @@
 """Tests for camera drift alignment, re-anchoring, and store migration."""
 
+import math
 import sqlite3
 import sys
 from datetime import datetime
@@ -16,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.monitoring import alignment as alignment_module
 from src.monitoring import recalibration
 from src.monitoring.alignment import (
+    DEFAULT_MIN_SHIFT,
     DEGRADED,
     FAILED,
     GOOD,
@@ -26,6 +28,7 @@ from src.monitoring.alignment import (
     build_reference_features,
     estimate_alignment,
     invert,
+    transform_magnitude,
     transform_point,
     transform_points,
 )
@@ -107,6 +110,20 @@ def test_transform_point_matches_point_list_helper() -> None:
     assert transform_point(matrix, (0.4, 0.4)) == pytest.approx((0.5, 0.2))
 
 
+def test_transform_magnitude_separates_a_move_from_a_lighting_change() -> None:
+    identity = np.float32([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    assert transform_magnitude(identity) == pytest.approx((0.0, 0.0, 0.0))
+
+    # A knock: the scene shifted 5% of the width while the camera tilted 2 degrees.
+    moved = cv2.getRotationMatrix2D((0.5, 0.5), 2.0, 1.0).astype(np.float32)
+    moved[0][2], moved[1][2] = 0.05, -0.02
+    shift, rotation, scale_delta = transform_magnitude(moved)
+    assert shift == pytest.approx(math.hypot(0.05, 0.02), abs=1e-6)
+    assert rotation == pytest.approx(2.0, abs=1e-3)
+    assert scale_delta == pytest.approx(0.0, abs=1e-4)
+    assert shift > DEFAULT_MIN_SHIFT, "and that clears the threshold"
+
+
 def test_alignment_tracker_reuses_the_last_good_transform(monkeypatch) -> None:
     frame = make_texture()
     tracker = AlignmentTracker(camera="living_room", trust_last_good_seconds=60.0)
@@ -158,25 +175,59 @@ def test_alignment_tracker_can_skip_zones_on_failure(monkeypatch) -> None:
     assert tracker.consecutive_failures == 1
 
 
-def test_failed_alignment_still_counts_towards_a_reanchor(monkeypatch) -> None:
-    """Resolving zones anyway must not hide drift from the re-anchor trigger.
+def test_failure_is_not_evidence_that_the_camera_moved(monkeypatch) -> None:
+    """A collapsed match is what a lighting change looks like, not a knock.
 
-    If failures stopped incrementing the counter, a camera that really moved
-    would keep producing wrong zones forever instead of alerting.
+    So a failure must keep counting (the ``failures`` trigger mode and the logs use
+    the number) while contributing nothing to the displacement streak, which is what
+    the default trigger watches.
     """
     tracker = AlignmentTracker(camera="sofa", trust_last_good_seconds=0.0, on_failure=USE_FRAME)
     tracker.set_reference(build_reference_features(make_texture()))
     monkeypatch.setattr(
         alignment_module,
         "estimate_alignment",
-        lambda *args, **kwargs: AlignmentResult(FAILED, None, 0, 0, 0.0, "no matches"),
+        lambda *args, **kwargs: AlignmentResult(FAILED, None, 0, 0, 0.0, "only 7 feature matches"),
     )
 
-    for step in range(6):
+    for step in range(60):
         state = tracker.resolve(make_texture(), 100.0 + step)
         assert state.zone_lookup_allowed, "zones must keep resolving"
 
-    assert tracker.consecutive_failures == 6
+    assert tracker.consecutive_failures == 60
+    assert tracker.displacement_streak == 0, "ten minutes of failures is not a move"
+    assert tracker.last_magnitude is None
+
+
+def test_a_moved_camera_builds_up_a_displacement_streak() -> None:
+    frame = make_texture()
+    tracker = AlignmentTracker(camera="sofa", trust_last_good_seconds=0.0)
+    tracker.set_reference(build_reference_features(frame))
+
+    # 5% of the width is well past DEFAULT_MIN_SHIFT, so this reads as a knock.
+    moved = shifted(frame, 0.05 * WIDTH, 0)
+    for step in range(3):
+        tracker.resolve(moved, 1000.0 + step)
+
+    assert tracker.displacement_streak == 3
+    assert tracker.last_magnitude[0] >= DEFAULT_MIN_SHIFT
+
+    # Adopting the moved frame as the reference is what the trigger asks for, and
+    # it must reset the evidence - otherwise the camera could only ever be
+    # re-anchored once.
+    tracker.set_reference(build_reference_features(moved))
+    assert tracker.displacement_streak == 0
+
+
+def test_a_frame_that_still_lines_up_clears_the_streak() -> None:
+    frame = make_texture()
+    tracker = AlignmentTracker(camera="feeder", trust_last_good_seconds=0.0)
+    tracker.set_reference(build_reference_features(frame))
+    tracker.displacement_streak = 2
+
+    tracker.resolve(frame, 1000.0)
+
+    assert tracker.displacement_streak == 0
 
 
 def test_alignment_tracker_without_reference_uses_zones_as_captured() -> None:

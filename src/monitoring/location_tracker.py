@@ -122,6 +122,9 @@ def build_trackers() -> list[CameraTracker]:
                 max_residual=settings["max_residual"],
                 trust_last_good_seconds=ALIGNMENT_CONFIG.get("trust_last_good_seconds", 60.0),
                 on_failure=settings["on_alignment_failure"],
+                min_shift=settings["min_shift"],
+                min_rotation_deg=settings["min_rotation_deg"],
+                min_scale_delta=settings["min_scale_delta"],
             )
             alignment.set_reference(reference_features_for(calibration, settings["work_width"]))
         if not calibration.zones:
@@ -386,15 +389,56 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def reanchor_reason(tracker: CameraTracker) -> str | None:
+    """Why this camera should adopt a fresh reference frame, or None.
+
+    The trigger has to be evidence that the *camera* moved, because that is the only
+    thing re-anchoring can fix. ``displacement`` is the default and the only mode
+    that fires while it can still work: projecting the zones onto a new frame needs
+    the very match that alignment produces, so a trigger that waits for matching to
+    collapse guarantees every attempt fails. That is exactly what the old
+    ``failures`` trigger did - living_room and feeder logged "automatic re-anchor
+    failed: only N feature matches" every cooldown for a whole day without a single
+    success, because an illumination change is what produced those failures and an
+    illumination change is not something a re-anchor can repair.
+
+    The other two modes are kept for a room where they fit better:
+
+    ``degraded``  a long run of marginal-but-usable matches, whatever their size.
+    ``failures``  the old consecutive-FAILED counter. Counted either way, so the
+                  number stays available for logs and for this mode.
+    """
+    alignment = tracker.alignment
+    if alignment is None:
+        return None
+    trigger = ALIGNMENT_CONFIG.get("reanchor_trigger", "displacement")
+    if trigger == "failures":
+        threshold = ALIGNMENT_CONFIG.get("reanchor_after_failures", 6)
+        if alignment.consecutive_failures >= threshold:
+            return f"{alignment.consecutive_failures} consecutive failed matches"
+        return None
+    if trigger == "degraded":
+        threshold = ALIGNMENT_CONFIG.get("reanchor_after_degraded_samples", 12)
+        if tracker.degraded_streak >= threshold:
+            return f"{tracker.degraded_streak} consecutive samples below the good tier"
+        return None
+    threshold = ALIGNMENT_CONFIG.get("reanchor_after_displacement_samples", 3)
+    if alignment.displacement_streak >= threshold:
+        shift, rotation, scale_delta = alignment.last_magnitude or (0.0, 0.0, 0.0)
+        return (
+            f"the transform has stayed large for {alignment.displacement_streak} samples "
+            f"(shift {shift:.3f}, rotation {rotation:.2f}deg, scale {scale_delta:.3f})"
+        )
+    return None
+
+
 def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
     """Re-anchor a drifted camera, then report the projected zones to Discord."""
-    if tracker.alignment is None:
+    reason = reanchor_reason(tracker)
+    if reason is None:
         return
     cooldown = ALIGNMENT_CONFIG.get("reanchor_min_interval_seconds", 600)
-    needs_reanchor = tracker.alignment.consecutive_failures >= ALIGNMENT_CONFIG.get(
-        "reanchor_after_failures", 6
-    ) or tracker.degraded_streak >= ALIGNMENT_CONFIG.get("reanchor_after_degraded_samples", 12)
-    if not needs_reanchor or now - tracker.last_reanchor_at < cooldown:
+    if now - tracker.last_reanchor_at < cooldown:
         return
 
     tracker.last_reanchor_at = now
@@ -409,6 +453,8 @@ def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
     if frame is None:
         print(f"[{tracker.name}] re-anchor skipped: no fresh frame")
         return
+
+    print(f"[{tracker.name}] re-anchor triggered: {reason}")
 
     outcome = reanchor(
         tracker.calibration,

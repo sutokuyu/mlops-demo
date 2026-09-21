@@ -32,6 +32,17 @@ RATIO_TEST = 0.75
 RANSAC_REPROJECTION_THRESHOLD = 0.004
 DEFAULT_WORK_WIDTH = 640
 
+# How big a usable transform has to get before it counts as "the camera moved".
+# Measured on these three cameras by matching every stored reference frame of a
+# camera against every other one (28 / 21 / 36 pairs, spanning 22:00 night frames
+# and 11:00 daylight frames of cameras nobody touched): a pure illumination change
+# never produced more than shift 0.019, rotation 0.47deg or scale 0.005, and often
+# produced no transform at all. The thresholds sit above that noise floor, and a
+# genuine knock is an order of magnitude larger than either.
+DEFAULT_MIN_SHIFT = 0.04
+DEFAULT_MIN_ROTATION_DEG = 1.0
+DEFAULT_MIN_SCALE_DELTA = 0.02
+
 
 def _resolve_project_root() -> Path:
     current = Path(__file__).resolve()
@@ -220,6 +231,23 @@ def describe_transform(matrix: np.ndarray) -> str:
     )
 
 
+def transform_magnitude(matrix: np.ndarray) -> tuple[float, float, float]:
+    """``(shift, |rotation in degrees|, |scale - 1|)`` of an affine transform.
+
+    This is what separates "the camera was knocked" from "the light changed". ORB
+    is rotation-invariant, so a camera that actually moved still matches plenty of
+    keypoints and hands back a transform with a visible shift or rotation, whereas
+    an illumination change collapses the match count and returns no transform at
+    all. So a large transform is evidence of movement and a failure is not, which is
+    the opposite of what the re-anchor trigger used to assume.
+    """
+    return (
+        math.hypot(matrix[0][2], matrix[1][2]),
+        abs(math.degrees(math.atan2(matrix[1][0], matrix[0][0]))),
+        abs(math.hypot(matrix[0][0], matrix[1][0]) - 1.0),
+    )
+
+
 @dataclass
 class AlignmentTracker:
     """Per-camera alignment with a fallback window for temporarily bad matches.
@@ -243,18 +271,44 @@ class AlignmentTracker:
     max_residual: float = 0.01
     trust_last_good_seconds: float = 60.0
     on_failure: str = USE_FRAME
+    # Above these, a usable transform means the camera moved rather than that the
+    # light changed. See transform_magnitude() for where the numbers come from.
+    min_shift: float = DEFAULT_MIN_SHIFT
+    min_rotation_deg: float = DEFAULT_MIN_ROTATION_DEG
+    min_scale_delta: float = DEFAULT_MIN_SCALE_DELTA
     last_good_matrix: np.ndarray | None = None
     last_good_at: float = 0.0
     consecutive_failures: int = 0
+    # Consecutive samples whose transform was large. This is what the re-anchor
+    # trigger watches by default: it acts while matching still works, which is the
+    # only moment projecting the zones onto a new frame can succeed.
+    displacement_streak: int = 0
+    last_magnitude: tuple[float, float, float] | None = None
     quality: str = GOOD
     note: str = ""
     history: list = field(default_factory=list)
+
+    def _record_displacement(self, matrix: np.ndarray) -> None:
+        """Update the displacement streak from a usable transform."""
+        magnitude = transform_magnitude(matrix)
+        self.last_magnitude = magnitude
+        shift, rotation, scale_delta = magnitude
+        if (
+            shift >= self.min_shift
+            or rotation >= self.min_rotation_deg
+            or scale_delta >= self.min_scale_delta
+        ):
+            self.displacement_streak += 1
+        else:
+            self.displacement_streak = 0
 
     def set_reference(self, reference: ReferenceFeatures | None) -> None:
         self.reference = reference
         self.last_good_matrix = None
         self.last_good_at = 0.0
         self.consecutive_failures = 0
+        self.displacement_streak = 0
+        self.last_magnitude = None
         self.quality = GOOD if reference is not None else DEGRADED
         self.note = "" if reference is not None else "no reference frame"
 
@@ -277,6 +331,10 @@ class AlignmentTracker:
 
         if result.quality == FAILED:
             self.consecutive_failures += 1
+            # A failure carries no transform, so it is no evidence of movement:
+            # break the streak rather than let it keep building up on samples that
+            # say nothing about where the camera is pointing.
+            self.displacement_streak = 0
             if (
                 self.last_good_matrix is not None
                 and now - self.last_good_at <= self.trust_last_good_seconds
@@ -294,6 +352,7 @@ class AlignmentTracker:
         self.consecutive_failures = 0
         self.quality = result.quality
         self.note = result.reason
+        self._record_displacement(result.matrix)
         if result.quality == GOOD:
             self.last_good_matrix = result.matrix
             self.last_good_at = now
