@@ -197,6 +197,48 @@ def message_question(content: str) -> str:
     return " ".join(without_mentions.split())[:MAX_QUESTION_CHARACTERS]
 
 
+def ignore_reason(
+    content: str,
+    *,
+    channel_id: int,
+    author_id: int,
+    is_bot: bool,
+    settings: BotSettings,
+    mentioned_bot: bool = False,
+) -> str | None:
+    """Why this message is not answered, or ``None`` when it is.
+
+    A reason rather than a bool, and the reason is logged for every delivered
+    message, because "the bot said nothing" is indistinguishable from "the bot
+    never received anything" when you are looking at it from outside. An empty
+    content is called out separately: it is the fingerprint of a Message Content
+    intent that is not really on.
+
+    Two things count as a request: a trigger word, or a real @mention of the bot.
+    The mention is there because the trigger list was the first thing to go wrong
+    in real use - "今天两只猫都做什么了" is a perfectly clear question that happened
+    to contain none of "报告/日报/report", and being ignored for it is not something
+    the person typing it can possibly guess.
+    """
+    if is_bot:
+        return "it was sent by a bot account"
+    if settings.allowed_channel_ids and channel_id not in settings.allowed_channel_ids:
+        return f"channel {channel_id} is not in discord_bot.allowed_channel_ids"
+    if settings.allowed_user_ids and author_id not in settings.allowed_user_ids:
+        return f"user {author_id} is not in discord_bot.allowed_user_ids"
+    if not content.strip():
+        return (
+            "the content arrived EMPTY, which is what a missing Message Content "
+            "Intent looks like (Developer Portal -> Bot -> Privileged Gateway Intents)"
+        )
+    if mentioned_bot:
+        return None
+    if not matches_trigger(content, settings.triggers):
+        triggers = ", ".join(settings.triggers)
+        return f"no trigger word ({triggers}) in {content[:40]!r}, and the bot was not mentioned"
+    return None
+
+
 def should_respond(
     content: str,
     *,
@@ -204,20 +246,39 @@ def should_respond(
     author_id: int,
     is_bot: bool,
     settings: BotSettings,
+    mentioned_bot: bool = False,
 ) -> bool:
     """Whether this message is a report request the bot should answer.
 
     A bot author is always ignored, which includes the bot's own replies - it does
     quote the question back, and answering that would be an infinite loop. An empty
-    allowlist does not restrict anything; it is the trigger word that decides.
+    allowlist does not restrict anything; a trigger word or a mention decides.
     """
-    if is_bot:
+    return (
+        ignore_reason(
+            content,
+            channel_id=channel_id,
+            author_id=author_id,
+            is_bot=is_bot,
+            settings=settings,
+            mentioned_bot=mentioned_bot,
+        )
+        is None
+    )
+
+
+def mentions_the_bot(message, bot_id: int | None) -> bool:
+    """Whether the message really @mentions the bot.
+
+    A real mention is a ``<@id>`` token Discord turns into an object; typing the
+    bot's display name as plain text looks identical to a human and is NOT one.
+    """
+    if bot_id is None:
         return False
-    if settings.allowed_channel_ids and channel_id not in settings.allowed_channel_ids:
-        return False
-    if settings.allowed_user_ids and author_id not in settings.allowed_user_ids:
-        return False
-    return matches_trigger(content, settings.triggers)
+    for user in getattr(message, "mentions", None) or ():
+        if getattr(user, "id", None) == bot_id:
+            return True
+    return False
 
 
 def format_failure(day: date, error: Exception) -> str:
@@ -284,24 +345,34 @@ def describe_settings(settings: BotSettings) -> str:
     )
 
 
-async def handle_message(message, settings: BotSettings) -> None:
+async def handle_message(message, settings: BotSettings, bot_id: int | None = None) -> None:
     """Answer one Gateway message. Deliberately free of any ``discord`` import.
 
     ``message`` only has to quack: ``content``, ``channel``, ``author`` and an
     async ``reply()``. Keeping it duck-typed means the I/O shell - the part that
     decides whether the blocking report runs off the event loop - is testable
     without a token or a connection.
+
+    Every delivered message is logged together with the decision, including the
+    ones that are ignored. That line is the difference between "the bot is broken"
+    and "the bot never saw your message".
     """
-    if not should_respond(
+    reason = ignore_reason(
         message.content,
         channel_id=message.channel.id,
         author_id=message.author.id,
         is_bot=bool(message.author.bot),
         settings=settings,
-    ):
+        mentioned_bot=mentions_the_bot(message, bot_id),
+    )
+    if reason is not None:
+        print(
+            f"discord_bot: ignored a message in {message.channel} from {message.author}: {reason}",
+            flush=True,
+        )
         return
     print(
-        f"discord_bot: report requested by {message.author} in #{message.channel}",
+        f"discord_bot: report requested by {message.author} in {message.channel}",
         flush=True,
     )
     # build_summary and the LLM call are blocking (sqlite + urllib). Running them
@@ -310,6 +381,29 @@ async def handle_message(message, settings: BotSettings) -> None:
     async with message.channel.typing():
         reply = await asyncio.to_thread(build_reply, message.content, settings=settings)
     await message.reply(reply)
+
+
+def describe_channel_access(client, channel_id: int) -> str:
+    """What the bot can actually do in an allowlisted channel.
+
+    Being in the server is not the same as being able to read a channel, and every
+    kind of "it did not answer" - no events, empty content, a rejected reply -
+    looks identical from the outside. One line at startup removes the guesswork.
+    """
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        return (
+            f"channel {channel_id} is NOT visible to the bot, so it will never see "
+            "messages there (check the invite and channel permissions)"
+        )
+    permissions = channel.permissions_for(channel.guild.me)
+    checks = (
+        ("view", permissions.view_channel),
+        ("send", permissions.send_messages),
+        ("history", permissions.read_message_history),
+    )
+    rendered = " ".join(f"{name}={'yes' if allowed else 'NO'}" for name, allowed in checks)
+    return f"#{channel.name} ({channel_id}): {rendered}"
 
 
 def build_client(settings: BotSettings):
@@ -333,10 +427,12 @@ def build_client(settings: BotSettings):
         guilds = ", ".join(guild.name for guild in client.guilds) or "no server yet"
         print(f"discord_bot: logged in as {client.user} ({guilds})", flush=True)
         print(f"discord_bot: {describe_settings(settings)}", flush=True)
+        for channel_id in sorted(settings.allowed_channel_ids):
+            print(f"discord_bot: {describe_channel_access(client, channel_id)}", flush=True)
 
     @client.event
     async def on_message(message) -> None:
-        await handle_message(message, settings)
+        await handle_message(message, settings, bot_id=client.user.id)
 
     return client
 

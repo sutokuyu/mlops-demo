@@ -34,9 +34,12 @@ from src.monitoring.discord_bot import (
     DiscordCheckError,
     build_reply,
     day_offset,
+    describe_channel_access,
     describe_settings,
     format_failure,
+    ignore_reason,
     matches_trigger,
+    mentions_the_bot,
     message_question,
     should_respond,
     target_day,
@@ -109,14 +112,28 @@ class FakeMessage:
         channel_id: int = 1,
         author_id: int = 2,
         is_bot: bool = False,
+        mentions: list | None = None,
     ) -> None:
         self.content = content
         self.channel = FakeChannel(channel_id)
         self.author = SimpleNamespace(id=author_id, bot=is_bot)
+        self.mentions = mentions or []
         self.replies: list[str] = []
 
     async def reply(self, content: str) -> None:
         self.replies.append(content)
+
+
+class FakeGuildChannel:
+    """Enough of a discord.TextChannel for describe_channel_access()."""
+
+    def __init__(self, name: str, **permissions) -> None:
+        self.name = name
+        self.guild = SimpleNamespace(me="the bot member")
+        self._permissions = SimpleNamespace(**permissions)
+
+    def permissions_for(self, member) -> SimpleNamespace:
+        return self._permissions
 
 
 # --- which messages get answered -------------------------------------------
@@ -166,6 +183,130 @@ def test_the_user_allowlist_is_enforced() -> None:
     configured = settings(allowed_user_ids=frozenset({7}))
     assert should_respond("报告", channel_id=1, author_id=7, is_bot=False, settings=configured)
     assert not should_respond("报告", channel_id=1, author_id=8, is_bot=False, settings=configured)
+
+
+# --- why a message was ignored ---------------------------------------------
+#
+# A silent bot is indistinguishable from a bot that never received anything, so
+# every delivered message is logged with its reason. These are the reasons.
+
+
+def answerable(**overrides) -> dict:
+    return {
+        "content": "报告",
+        "channel_id": 1,
+        "author_id": 2,
+        "is_bot": False,
+        "settings": settings(),
+        **overrides,
+    }
+
+
+def test_an_answerable_message_has_no_reason() -> None:
+    assert ignore_reason(**answerable()) is None
+
+
+def test_each_ignore_reason_names_what_to_change() -> None:
+    assert "bot account" in ignore_reason(**answerable(is_bot=True))
+
+    # An empty allowlist restricts nothing, so a channel has to be configured
+    # before another channel can be refused.
+    assert ignore_reason(**answerable(channel_id=99)) is None
+    assert "allowed_channel_ids" in ignore_reason(
+        **answerable(channel_id=99, settings=settings(allowed_channel_ids=frozenset({1})))
+    )
+
+    assert "allowed_user_ids" in ignore_reason(
+        **answerable(author_id=99, settings=settings(allowed_user_ids=frozenset({7})))
+    )
+    assert "no trigger word" in ignore_reason(**answerable(content="今天天气不错"))
+
+
+# --- mentioning the bot counts as a request --------------------------------
+#
+# The trigger list was the first thing to fail in real use. "今天两只猫都做什么了"
+# is an unmistakable question that contains none of 报告/日报/report, and nobody
+# typing it can guess that a keyword was required.
+
+
+def test_a_real_mention_is_a_request_even_without_a_trigger_word() -> None:
+    assert (
+        ignore_reason(**answerable(content="<@7> 今天两只猫都做什么了", mentioned_bot=True)) is None
+    )
+
+
+def test_the_mention_has_to_be_real() -> None:
+    """Typing the bot's display name is plain text, not a mention."""
+    assert mentions_the_bot(FakeMessage("hi", mentions=[SimpleNamespace(id=7)]), 7)
+    assert not mentions_the_bot(FakeMessage("hi", mentions=[SimpleNamespace(id=8)]), 7)
+    assert not mentions_the_bot(FakeMessage("hi"), 7)
+    assert not mentions_the_bot(FakeMessage("hi", mentions=[SimpleNamespace(id=7)]), None)
+
+
+def test_handle_message_answers_a_mention(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "discord")
+    message = FakeMessage(
+        "<@1551499023645679707> 今天两只猫都做什么了",
+        mentions=[SimpleNamespace(id=1551499023645679707)],
+    )
+
+    asyncio.run(
+        discord_bot.handle_message(
+            message,
+            settings=settings(database=database_with_a_visit(tmp_path)),
+            bot_id=1551499023645679707,
+        )
+    )
+    assert len(message.replies) == 1
+    assert "on_sofa" in message.replies[0]
+
+
+def test_an_empty_message_is_named_as_the_intent_symptom() -> None:
+    """Empty content is the fingerprint of a Message Content intent that is off.
+
+    Without saying so, this case reads exactly like a wrong trigger word.
+    """
+    reason = ignore_reason(**answerable(content="   "))
+    assert "EMPTY" in reason
+    assert "Message Content Intent" in reason
+
+
+def test_handle_message_logs_why_it_ignored_something(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        discord_bot,
+        "build_reply",
+        lambda *args, **kwargs: pytest.fail("nothing must be built for an ignored message"),
+    )
+    message = FakeMessage("今天天气不错")
+
+    asyncio.run(discord_bot.handle_message(message, settings=settings()))
+    output = capsys.readouterr().out
+    assert "ignored" in output
+    assert "no trigger word" in output
+
+
+def test_describe_channel_access_reports_the_three_permissions() -> None:
+    """Being in the server is not the same as being able to read the channel."""
+    channel = FakeGuildChannel(
+        "常规",
+        view_channel=True,
+        send_messages=True,
+        read_message_history=False,
+    )
+    client = SimpleNamespace(get_channel=lambda channel_id: channel)
+
+    line = describe_channel_access(client, 42)
+    assert "#常规" in line
+    assert "view=yes" in line
+    assert "send=yes" in line
+    assert "history=NO" in line
+
+
+def test_describe_channel_access_says_when_the_channel_is_invisible() -> None:
+    client = SimpleNamespace(get_channel=lambda channel_id: None)
+    line = describe_channel_access(client, 42)
+    assert "NOT visible" in line
+    assert "42" in line
 
 
 # --- which day is being asked about ----------------------------------------
@@ -390,6 +531,9 @@ def test_the_client_asks_for_message_content_and_registers_the_handler(
     assert inspect.iscoroutinefunction(client.on_message)
     assert inspect.iscoroutinefunction(client.on_ready)
 
+    # discord.py fills the user in on the connection state at login, and never
+    # fires on_message before that; do what it does so the handler can read it.
+    client._connection.user = SimpleNamespace(id=424242)
     message = FakeMessage("报告")
     asyncio.run(client.on_message(message))
     assert len(message.replies) == 1
