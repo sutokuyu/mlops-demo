@@ -27,7 +27,8 @@ identity_collection:
     - name: feeder
       rtsp_url: ${FEEDER_RTSP_URL:}
 
-# device is shared: the detector trainer and realtime_view both default to it.
+# The trainer's default device. Inference picks its device from
+# locations.yaml tracking.device instead, so all three runtime tools agree.
 training:
   device: 0
   identity_detection_dataset: dataset/data.yaml

@@ -24,6 +24,8 @@ tracking:
   sample_interval_seconds: 5.0
   confidence_threshold: 0.3
   imgsz: 640
+  # Inference device, shared by the tracker, realtime_view and the browser preview.
+  # The trainer has its own default under config.yaml training.device.
   device: 0
   # box 的哪个部位用来查 zone。
   #   bottom_center - 只用底边中点（旧行为）。猫踩在地面上时准确，但尾巴或

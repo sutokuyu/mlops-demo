@@ -482,7 +482,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "reported as a hint when nothing passes --conf.",
     )
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--device", default=CONFIG["training"]["device"])
+    parser.add_argument("--device", default=TRACKING_CONFIG.get("device"))
     parser.add_argument(
         "--fps", type=float, default=1.0, help="Detection/display rate in frames per second."
     )

@@ -33,6 +33,7 @@ from src.monitoring.location_config import (
     DEFAULT_IDENTITY_MODEL,
     IDENTITY_CLASSES,
     PREVIEW_CONFIG,
+    TRACKING_CONFIG,
     alignment_settings,
     camera_rtsp_url,
     configured_cameras,
@@ -91,7 +92,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "sub-threshold detection came.",
     )
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--device", default=PREVIEW_CONFIG.get("device"))
+    parser.add_argument("--device", default=TRACKING_CONFIG.get("device"))
     parser.add_argument(
         "--fps",
         type=float,
