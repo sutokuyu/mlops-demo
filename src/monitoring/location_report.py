@@ -126,6 +126,21 @@ PRESENTATION = (
     "exactly as it appears. Time should be numbers rather than words."
 )
 
+# Appended to the prompt when someone asks for something specific instead of the
+# plain daily report (the Discord bot passes the message through). It sits right
+# after TASK so the EVENTS verdicts, the presentation rules and the grounding
+# rules all still apply to the answer; only the "what to cover" part is widened.
+QUESTION = (
+    'The owner asked this by message: "{question}"\n'
+    "Answer it directly and first. The daily requirements above still apply: meals, water "
+    "and toilet verdicts are never dropped, and a question the data cannot answer is "
+    "answered by saying the data does not cover it."
+)
+
+# User text ends up inside the system prompt, so it is capped: a long message
+# would otherwise be able to push GROUNDING_RULES out of the model's attention.
+MAX_QUESTION_CHARACTERS = 200
+
 # Deliberately not configurable. Models happily invent a plausible day when a
 # playful tone is requested, so this stays last in the prompt for recency.
 GROUNDING_RULES = (
@@ -139,6 +154,7 @@ def build_instruction(
     persona: str | None = None,
     style: str | None = None,
     hints: str | None = None,
+    question: str | None = None,
 ) -> str:
     """Compose the system prompt from tunable voice plus fixed requirements.
 
@@ -149,8 +165,13 @@ def build_instruction(
     fact. Rules that can be computed from the data go in code instead: the toilet
     verdict used to be a hint and is now ``toilet_events()``.
 
+    ``question`` is an optional message from the owner (the Discord bot forwards
+    it). It adds a block and changes nothing else, so every fixed requirement is
+    still in the prompt.
+
     Passing ``None`` for any block means "use the configured one"; an explicit
-    empty string asks for that block to be omitted.
+    empty string asks for that block to be omitted. A blank ``question`` is
+    omitted like any other empty block.
     """
     config = REPORT_CONFIG["llm"]
     if persona is None:
@@ -160,9 +181,16 @@ def build_instruction(
     if hints is None:
         hints = config.get("hints") or ""
 
+    question_block = ""
+    if question and question.strip():
+        question_block = QUESTION.format(
+            question=question.strip()[:MAX_QUESTION_CHARACTERS],
+        )
+
     blocks = [
         persona.strip() or NEUTRAL_PERSONA,
         TASK,
+        question_block,
         EVENTS,
         PRESENTATION.format(language=language),
         style.strip(),
@@ -560,12 +588,12 @@ def llm_temperature(override: float | None = None) -> float:
     return value
 
 
-def call_llm(summary: dict, temperature: float | None = None) -> str:
+def call_llm(summary: dict, temperature: float | None = None, question: str | None = None) -> str:
     llm = REPORT_CONFIG["llm"]
     if not llm["api_key"]:
         raise RuntimeError("report.llm.api_key is not configured")
     language = REPORT_CONFIG.get("language", "zh")
-    instruction = build_instruction(language)
+    instruction = build_instruction(language, question=question)
     payload = {
         "model": llm["model"],
         "temperature": llm_temperature(temperature),
@@ -618,14 +646,23 @@ def send_to_discord(content: str) -> None:
     )
 
 
-def compose(summary: dict, text: str, temperature: float | None = None) -> str:
+def compose(
+    summary: dict,
+    text: str,
+    temperature: float | None = None,
+    question: str | None = None,
+) -> str:
     """The outbound text, after any LLM rewriting for the configured mode.
 
     Split out of deliver() so a dry run can generate and show exactly what would
     have been posted without touching the network beyond the LLM call itself.
+
+    ``question`` is only used by the Discord bot (and by any other caller that
+    wants the narrative to answer something specific); the daily report leaves it
+    as ``None``.
     """
     if REPORT_CONFIG.get("mode", "discord").lower() == "llm":
-        return call_llm(summary, temperature)
+        return call_llm(summary, temperature, question)
     return text
 
 

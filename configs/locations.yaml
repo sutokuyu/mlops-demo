@@ -213,3 +213,42 @@ report:
   discord:
     webhook_url: ${LOCATION_REPORT_WEBHOOK_URL:}
     username: Cat Location Bot
+
+# ---------------------------------------------------------------------------
+# 反向通道：让程序能「听懂」Discord 聊天室里的消息（"报告一下今天两只猫都做什么了"）。
+#
+# 上面 report.discord 里的是 webhook，只能往外发、读不到任何东西。要听主人说话就
+# 必须有一个真正的 Bot 应用并保持一条 Gateway 长连接。这也是这台机器唯一现实可行
+# 的做法：Gateway 是 bot 主动连出去的 WebSocket，所以在 NAT/WSL 后面、没有公网 IP、
+# 没有隧道也能用；斜杠命令那套 Interactions HTTP 端点需要公网 HTTPS，而且必须 3 秒
+# 内应答。详见 src/monitoring/discord_bot.py 的模块注释。
+#
+# 前置条件（都在 Discord Developer Portal 里，本仓库代劳不了）：
+#   1. New Application -> Bot -> Reset Token，把 token 写进 .env 的 DISCORD_BOT_TOKEN。
+#   2. 同一页的 Privileged Gateway Intents 打开 Message Content Intent。
+#      不开的话事件照样送达，但 message.content 永远是空串 —— bot 看起来像掉线了。
+#   3. OAuth2 -> URL Generator 勾 bot 权限，用生成的链接把 bot 邀请进服务器。
+# ---------------------------------------------------------------------------
+discord_bot:
+  # 从 .env 的 DISCORD_BOT_TOKEN 读；留空则 cat-discord 不会启动。
+  token: ${DISCORD_BOT_TOKEN:}
+  # 只在这些频道里回应。可以写成列表，也可以写成逗号分隔的字符串
+  # （方便用 ${DISCORD_BOT_CHANNEL_IDS:} 之类的环境变量给）。
+  # 留空 = 不限制，此时唯一的口子就是下面的触发词 —— 也就是同一个服务器里
+  # 谁都能用一句话换一次 LLM 调用，所以建议还是填上。
+  allowed_channel_ids:
+    # susu的服务器 → #常规
+    - 1536752314046488670
+  # 同上，限制到具体的人。留空 = 不限制。
+  allowed_user_ids: []
+  # 消息里出现任意一个词就当是在要日报（不分大小写）。
+  triggers:
+    - 报告
+    - 日报
+    - report
+  # 默认报告哪一天：0 = 今天。消息里写「昨天」「前天」会自动覆盖它。
+  days_ago: 0
+  # 可选：只覆盖 bot 回答的温度，留空沿用 report.llm.temperature。
+  # temperature: 0.7
+  # 可选：读另一份数据库（例如对着演示库试文案）。
+  # database: data/location_history.db

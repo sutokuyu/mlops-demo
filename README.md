@@ -4,7 +4,7 @@ Three fixed RTSP cameras watch a living room. A YOLO model detects **which** cat
 is in frame, zone polygons drawn on each camera's reference frame turn that into
 a room location, and the result is recorded to SQLite around the clock. A
 scheduled job turns the finished day into a short narrative and posts it to
-Discord.
+Discord. Ask in the channel what happened today and the bot answers there too.
 
 ## Project Goal
 
@@ -17,6 +17,7 @@ Discord.
   **reference frame**; every sample is aligned back to it with ORB features, so a
   nudged camera does not silently relabel the room.
 - Record dwell visits 24/7 and report the day.
+- Answer questions about the day, asked in Discord, from the same data.
 
 ## Pipeline
 
@@ -41,7 +42,8 @@ models/cat_identity_detection_yolo26n_*/weights/best.pt
 location_tracker.py ──► data/location_history.db
    │                          │
    ├── realtime_view.py       │  where is the cat, right now
-   └── location_report.py ────┘  what happened today ──► Discord
+   ├── discord_bot.py ────────┤  "报告一下今天两只猫都做什么了" (inbound)
+   └── location_report.py ────┘  what happened today ──► Discord (webhook)
 ```
 
 ## Repository Layout
@@ -53,9 +55,9 @@ location_tracker.py ──► data/location_history.db
 | `src/monitoring/` | Zones, alignment, tracking, reporting, browser UI |
 | `src/notification/` | Discord webhook posting |
 | `configs/config.yaml` | Cameras, model paths, training defaults |
-| `configs/locations.yaml` | Tracking loop, alignment, preview, report |
+| `configs/locations.yaml` | Tracking loop, alignment, preview, report, Discord bot |
 | `configs/zones.yaml` | Zone polygons, written by the tools |
-| `deploy/systemd/` | Units for the 24/7 tracker and the daily report |
+| `deploy/systemd/` | Units for the 24/7 tracker, the daily report and the Discord bot |
 | `scripts/` | Shell wrappers and a demo-day generator |
 
 ### Entry points
@@ -70,6 +72,7 @@ Every module is reachable through a thin `src/execute_*.py` wrapper that fixes
 | `src/execute_web_preview.py` | `monitoring/web_preview_app.py` | Browser preview and zone editor |
 | `src/execute_recalibrate.py` | `monitoring/recalibration.py` | Re-anchor a camera's zones |
 | `src/execute_location_report.py` | `monitoring/location_report.py` | Daily summary and delivery |
+| `src/execute_discord_bot.py` | `monitoring/discord_bot.py` | Answers report requests in a Discord channel |
 
 The module column is relative to `src/`.
 
@@ -81,7 +84,8 @@ source .venv/bin/activate        # .venv/bin/... also works without activating
 pip install -r requirements.txt
 ```
 
-Dependencies: `ultralytics`, `torch`, `opencv-python`, `numpy`, `PyYAML`.
+Dependencies: `ultralytics`, `torch`, `opencv-python`, `numpy`, `PyYAML`,
+`discord.py` (the bot only; the tracker and the report do not import it).
 
 ### `.env`
 
@@ -95,6 +99,7 @@ SOFA_RTSP_URL=rtsp://<user>:<pass>@<ip>:<port>/h264/ch1/main/av_stream
 FEEDER_RTSP_URL=rtsp://<user>:<pass>@<ip>:<port>/h264/ch1/main/av_stream
 LLM_API_KEY=...
 LOCATION_REPORT_WEBHOOK_URL=https://discord.com/api/webhooks/.../...
+DISCORD_BOT_TOKEN=...                 # only needed for the inbound bot
 ```
 
 The camera placeholders in `configs/config.yaml` are `${LIVING_ROOM_RTSP_URL:}`
@@ -228,10 +233,64 @@ python scripts/make_demo_day.py /tmp/demo.db
 scripts/daily_report.sh --date 2026-09-19 --database /tmp/demo.db --dry-run
 ```
 
-### 9. Run it 24/7
+### 9. Ask from Discord
 
-`deploy/systemd/` holds two units: `cat-tracker.service` runs the recorder with
-`Restart=always`, and `cat-report.timer` fires `cat-report.service` at midnight.
+Posting is a webhook, but a webhook can only send. Answering a question means
+holding a **Gateway** connection, which is also the only option that works from
+this machine: the bot dials out over a WebSocket, so no inbound port, no public
+IP and no tunnel are needed. (Slash commands over the Interactions HTTP endpoint
+would need a public HTTPS URL and a reply within three seconds.)
+
+In the [Discord Developer Portal](https://discord.com/developers/applications):
+
+1. **New Application → Bot → Reset Token**, put it in `.env` as
+   `DISCORD_BOT_TOKEN`.
+2. On the same page, enable **Message Content Intent** under *Privileged Gateway
+   Intents*. Without it the events still arrive but `message.content` is always
+   empty, so the bot looks dead while it is connected.
+3. **OAuth2 → URL Generator**: scope `bot`, then open the generated URL to invite
+   it to your server. It needs *View Channel*, *Send Messages* and *Read Message
+   History* in whichever channel it should answer in.
+
+```bash
+scripts/run_discord_bot.sh --check-only    # validate config and ask Discord two questions
+scripts/run_discord_bot.sh --offline --check-only   # ...without the network
+scripts/run_discord_bot.sh                 # run it in the foreground
+```
+
+`--check-only` never opens the Gateway, but it does ask Discord two things that
+cannot be answered locally and that both turn into a service restarting forever:
+is the token still valid (a reset token is otherwise only discovered from
+`journalctl`), and is **Message Content Intent** on. The answer comes from the
+application's own flags in `GET /applications/@me`, and the intent being off is
+reported with the exact portal path to fix it - the Gateway would refuse the
+connection with `PrivilegedIntentsRequired`.
+
+Then say this in the channel:
+
+```
+报告一下今天两只猫都做什么了
+```
+
+`monitoring/discord_bot.py` reads the day's visits with the same
+`build_summary()` the daily report uses, hands your own words to the LLM as the
+`question` block, and replies in the channel. Only messages containing a trigger
+from `discord_bot.triggers` are answered, and bot accounts are ignored (the reply
+quotes the question back, so answering a bot would loop).
+
+- `昨天` / `yesterday` and `前天` ask about other days; otherwise
+  `discord_bot.days_ago` (0 = today) decides.
+- `allowed_channel_ids` / `allowed_user_ids` restrict who can spend an LLM call.
+  Empty means *no restriction*, so set them.
+- Two fallbacks keep the bot from going silent: if the data cannot be read it
+  replies with the day and the reason, and if only the LLM call fails it replies
+  with the plain `render_text()` summary rather than an apology.
+
+### 10. Run it 24/7
+
+`deploy/systemd/` holds three units: `cat-tracker.service` runs the recorder with
+`Restart=always`, `cat-report.timer` fires `cat-report.service` at midnight, and
+`cat-discord.service` keeps the bot connected.
 
 ```bash
 scripts/install_services.sh              # symlink, enable, enable-linger, start
@@ -243,7 +302,13 @@ systemctl --user status cat-tracker.service
 journalctl --user -u cat-tracker -f
 systemctl --user list-timers cat-report.timer
 systemctl --user start cat-report.service      # send one now, to test
+journalctl --user -u cat-discord -f            # live bot log
 ```
+
+`install_services.sh` preflights each unit before starting it, so a missing
+camera URL or a bot that fails its checks is left **enabled but not started** -
+with the reason printed instead of a unit that restarts forever. Re-run it after
+fixing whatever it named.
 
 Two details worth knowing:
 
@@ -277,6 +342,7 @@ After editing a unit file, `systemctl --user daemon-reload` then restart. Editin
 | `tracking` | Sample interval, confidence, `imgsz`, switch hysteresis, timeouts, database |
 | `alignment` | ORB matching thresholds and the trust-last-good window |
 | `report` | Timezone, language, delivery mode, and the LLM settings |
+| `discord_bot` | Bot token, channel/user allowlists, trigger words, default day |
 
 ### Prompt Layers
 
@@ -289,6 +355,7 @@ belongs in the config.
 | --- | --- | --- |
 | `persona` | config | You want a different voice |
 | `TASK` | code | The report must cover something new |
+| `QUESTION` | runtime | Only when a caller passes one (the Discord bot forwards the message) |
 | `EVENTS` | code | A new kind of derived fact appears |
 | `PRESENTATION` | code | Language or formatting rules change |
 | `style` | config | You want it to read differently |
@@ -309,7 +376,10 @@ and handed to the model as an already-decided `events` array.
 ```
 
 `tests/` covers alignment, zone lookup, tracking, the web UI's embedded
-JavaScript, and the report's prompt assembly and delivery. The two JavaScript
+JavaScript, the report's prompt assembly and delivery, and the Discord bot's
+decision rules (which messages to answer, which day they mean, what to reply).
+The bot tests run without a token or a connection: everything above `run()` in
+`discord_bot.py` is free of any `discord` import on purpose. The two JavaScript
 guards are worth knowing about: one checks per-line quote balance (a raw newline
 inside a Python string ends a JS string literal early and the browser discards the
 whole script), the other checks that every function the JS calls is defined.

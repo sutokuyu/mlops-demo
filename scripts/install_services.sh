@@ -14,15 +14,15 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SOURCE="$PROJECT_ROOT/deploy/systemd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNITS=(cat-tracker.service cat-report.service cat-report.timer)
+UNITS=(cat-tracker.service cat-report.service cat-report.timer cat-discord.service)
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    systemctl --user disable --now cat-tracker.service cat-report.timer || true
+    systemctl --user disable --now cat-tracker.service cat-report.timer cat-discord.service || true
     for unit in "${UNITS[@]}"; do
         rm -f "$UNIT_DIR/$unit"
     done
     systemctl --user daemon-reload
-    echo "Removed the cat tracker service and the report timer."
+    echo "Removed the cat tracker service, the report timer and the Discord bot."
     exit 0
 fi
 
@@ -45,9 +45,11 @@ fi
 
 systemctl --user enable --now cat-report.timer
 
-# Starting the tracker when a camera URL is missing only produces a failed unit
-# and burns the restart budget, so ask the launcher's own preflight first.
-if TRACKER_CHECK_ONLY=1 "$PROJECT_ROOT/scripts/run_tracker.sh" >/dev/null 2>&1; then
+# Starting a service whose preflight already fails only produces a failed unit and
+# burns its restart budget, so each launcher is asked first. The reason is kept
+# rather than discarded: "enabled, NOT started" on its own is the least useful
+# message this script could print.
+if tracker_preflight="$(TRACKER_CHECK_ONLY=1 "$PROJECT_ROOT/scripts/run_tracker.sh" 2>&1)"; then
     systemctl --user enable --now cat-tracker.service
     tracker_state="started"
 else
@@ -55,9 +57,20 @@ else
     tracker_state="enabled, NOT started"
 fi
 
+# Same reasoning for the bot. Its preflight also asks Discord whether the token is
+# still valid and Message Content Intent is on, because either answer being wrong
+# means the service can only restart forever.
+if bot_preflight="$("$PROJECT_ROOT/scripts/run_discord_bot.sh" --check-only 2>&1)"; then
+    systemctl --user enable --now cat-discord.service
+    bot_state="started"
+else
+    systemctl --user enable cat-discord.service
+    bot_state="enabled, NOT started"
+fi
+
 cat <<EOF
 
-Installed. The tracker is $tracker_state.
+Installed. The tracker is $tracker_state. The bot is $bot_state.
 
 Useful commands:
 
@@ -66,6 +79,8 @@ Useful commands:
     systemctl --user list-timers cat-report.timer   # when the next report runs
     journalctl --user -u cat-report -n 50           # what the last report did
     systemctl --user start cat-report.service       # send one now, to test
+    systemctl --user status cat-discord.service     # is the bot connected
+    journalctl --user -u cat-discord -f             # live bot log
 
 The tracker is only restarted 10 times per 5 minutes. If startup is broken it
 gives up in a failed state; after fixing the cause, reset it with:
@@ -77,9 +92,24 @@ EOF
 
 if [[ "$tracker_state" != "started" ]]; then
     echo
-    echo "The tracker did not start because its preflight failed. Run it directly"
-    echo "to see why, then start the service:"
+    echo "The tracker did not start because its preflight failed:"
+    echo
+    printf '%s\n' "$tracker_preflight"
+    echo
+    echo "Fix that, then start the service:"
     echo
     echo "    ./scripts/run_tracker.sh"
     echo "    systemctl --user start cat-tracker.service"
+fi
+
+if [[ "$bot_state" != "started" ]]; then
+    echo
+    echo "The bot did not start because its preflight failed:"
+    echo
+    printf '%s\n' "$bot_preflight"
+    echo
+    echo "Fix that, then start the service:"
+    echo
+    echo "    ./scripts/run_discord_bot.sh --check-only"
+    echo "    systemctl --user start cat-discord.service"
 fi
