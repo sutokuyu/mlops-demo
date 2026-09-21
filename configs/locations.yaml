@@ -187,7 +187,9 @@ discord_bot:
   # （方便用 ${DISCORD_BOT_CHANNEL_IDS:} 之类的环境变量给）。
   # 留空 = 不限制，此时唯一的口子就是下面的触发词 —— 也就是同一个服务器里
   # 谁都能用一句话换一次 LLM 调用，所以建议还是填上。
-  allowed_channel_ids: []
+  allowed_channel_ids:
+    # susu的服务器 → #常规
+    - 1536752314046488670
   # 同上，限制到具体的人。留空 = 不限制。
   allowed_user_ids: []
   # 消息里出现任意一个词就当是在要日报（不分大小写）。

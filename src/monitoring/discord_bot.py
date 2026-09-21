@@ -9,9 +9,9 @@ the Interactions HTTP endpoint) needs a public HTTPS URL and an answer within th
 seconds, neither of which this box offers.
 
 Message Content is a privileged intent and has to be enabled in the Discord
-Developer Portal. Without it the Gateway still delivers the events but
-``message.content`` arrives empty, so the bot looks asleep while it is in fact
-awake - which is exactly why ``--check-only`` and the log line at startup mention it.
+Developer Portal. Without it the Gateway refuses the connection outright
+(``PrivilegedIntentsRequired``), which is why the preflight checks the
+application's own flags before systemd is allowed to start anything.
 
 Everything except ``build_client``/``run`` is deliberately free of any ``discord``
 import. The decision rules (which messages to answer, which day they mean, what to
@@ -23,9 +23,11 @@ an object that quacks like ``discord.Message``.
 
 import argparse
 import asyncio
+import json
 import re
 import sys
 import urllib.error
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -65,6 +67,31 @@ MISSING_TOKEN_MESSAGE = (
     "(Bot -> Privileged Gateway Intents). Without that intent the bot connects but\n"
     "sees every message as empty text."
 )
+
+# Discord sits behind Cloudflare, which answers urllib's default agent with
+# "403 error code: 1010". Any explicit agent works.
+USER_AGENT = "mlops-cat-demo/1.0"
+DISCORD_API = "https://discord.com/api/v10"
+REQUEST_TIMEOUT_SECONDS = 30
+
+# Application flags that answer "is the Message Content intent switched on".
+# The *_LIMITED variant means it is on but the application has reached 100
+# servers, where content stops being delivered - irrelevant for one home server,
+# and worth telling apart from "off" so the advice is not misleading.
+MESSAGE_CONTENT_FLAG = 1 << 18
+MESSAGE_CONTENT_LIMITED_FLAG = 1 << 19
+
+INTENT_OFF_MESSAGE = (
+    "Message Content Intent is NOT enabled for this application.\n"
+    "Discord will refuse the Gateway connection (PrivilegedIntentsRequired), so\n"
+    "the service would only restart forever. To fix it:\n"
+    "  Developer Portal -> your application -> Bot -> Privileged Gateway Intents\n"
+    "  -> enable 'Message Content Intent' -> Save Changes."
+)
+
+
+class DiscordCheckError(RuntimeError):
+    """The online preflight found something Discord would reject at runtime."""
 
 
 @dataclass(frozen=True)
@@ -321,6 +348,57 @@ def run(settings: BotSettings) -> None:
     build_client(settings).run(settings.token)
 
 
+def _api_get(path: str, token: str) -> dict:
+    """GET a Discord REST endpoint with a bot token.
+
+    The Authorization scheme for bots is ``Bot <token>``, not ``Bearer`` - a
+    bearer token is rejected with 401 and looks like an invalid token.
+    """
+    request = urllib.request.Request(
+        DISCORD_API + path,
+        headers={"User-Agent": USER_AGENT, "Authorization": f"Bot {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:200].strip()
+        if error.code == 401:
+            raise DiscordCheckError(
+                "Discord rejected the token (401 Unauthorized). It was probably\n"
+                "reset in the Developer Portal after it was copied into .env;\n"
+                f"copy the current one again. Discord said: {detail}"
+            ) from error
+        raise DiscordCheckError(f"Discord returned {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise DiscordCheckError(f"could not reach Discord: {error.reason}") from error
+
+
+def verify_discord_access(settings: BotSettings) -> list[str]:
+    """Check the things only Discord can answer. Raises DiscordCheckError.
+
+    Both of these are invisible offline and both were seen for real: a token that
+    was reset after it was copied into .env, and a Message Content intent that was
+    never switched on. Either one turns into a restart loop under systemd, so the
+    preflight asks before the unit is allowed to start.
+
+    The intent is readable without connecting: the application object carries the
+    ``GATEWAY_MESSAGE_CONTENT`` flag, which is set by the portal switch itself.
+    """
+    application = _api_get("/applications/@me", settings.token)
+    flags = int(application.get("flags") or 0)
+    name = application.get("name", "?")
+
+    if flags & MESSAGE_CONTENT_LIMITED_FLAG:
+        intent_note = "Message Content Intent: enabled (limited to 100 servers)"
+    elif flags & MESSAGE_CONTENT_FLAG:
+        intent_note = "Message Content Intent: enabled"
+    else:
+        raise DiscordCheckError(INTENT_OFF_MESSAGE)
+
+    return [f"Discord accepted the token (application: {name})", intent_note]
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Answer cat-report questions posted in a Discord channel.",
@@ -330,6 +408,12 @@ def parse_args(argv=None):
         action="store_true",
         help="Validate the configuration and exit; used before letting systemd "
         "start the service, so a broken setup is not installed as a restart loop.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="With --check-only, skip the two checks that need Discord (is the "
+        "token still valid, is Message Content Intent on).",
     )
     return parser.parse_args(argv)
 
@@ -345,6 +429,14 @@ def main(argv=None) -> None:
                 "Warning: discord_bot.allowed_channel_ids is empty, so the bot will "
                 "answer in every channel it can read."
             )
+        # Offline checks are done; the remaining two answers live on Discord's
+        # side and are exactly the ones that produce a restart loop.
+        if not args.offline:
+            try:
+                for note in verify_discord_access(settings):
+                    print(note)
+            except DiscordCheckError as error:
+                raise SystemExit(str(error)) from error
         print(f"discord_bot: configuration looks usable ({describe_settings(settings)}).")
         return
     if not settings.allowed_channel_ids:

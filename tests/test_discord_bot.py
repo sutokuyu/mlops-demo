@@ -7,7 +7,11 @@ having logged in anywhere.
 
 import asyncio
 import inspect
+import io
+import json
 import sys
+import urllib.error
+import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +27,11 @@ import src.monitoring.discord_bot as discord_bot
 import src.monitoring.location_report as location_report
 from src.monitoring.discord_bot import (
     DEFAULT_TRIGGERS,
+    MESSAGE_CONTENT_FLAG,
+    MESSAGE_CONTENT_LIMITED_FLAG,
     MISSING_TOKEN_MESSAGE,
     BotSettings,
+    DiscordCheckError,
     build_reply,
     day_offset,
     describe_settings,
@@ -33,6 +40,7 @@ from src.monitoring.discord_bot import (
     message_question,
     should_respond,
     target_day,
+    verify_discord_access,
 )
 from src.monitoring.location_store import LocationStore
 
@@ -422,16 +430,46 @@ def test_check_only_refuses_to_start_without_a_token(monkeypatch) -> None:
 
 def test_check_only_passes_with_a_token(monkeypatch, capsys) -> None:
     monkeypatch.setattr(discord_bot, "bot_settings", lambda: settings())
+    monkeypatch.setattr(discord_bot, "verify_discord_access", lambda settings: ["checked"])
     monkeypatch.setattr(
         discord_bot, "run", lambda settings: pytest.fail("--check-only must not connect")
     )
 
     discord_bot.main(["--check-only"])
+    output = capsys.readouterr().out
+    assert "usable" in output
+    assert "checked" in output
+
+
+def test_check_only_offline_skips_the_network(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(discord_bot, "bot_settings", lambda: settings())
+    monkeypatch.setattr(
+        discord_bot,
+        "verify_discord_access",
+        lambda settings: pytest.fail("--offline must not touch the network"),
+    )
+
+    discord_bot.main(["--check-only", "--offline"])
     assert "usable" in capsys.readouterr().out
+
+
+def test_check_only_reports_what_discord_says(monkeypatch) -> None:
+    """A rejected token has to surface as the reason, not as an exit code."""
+    monkeypatch.setattr(discord_bot, "bot_settings", lambda: settings())
+
+    def refuse(settings):
+        raise DiscordCheckError("Message Content Intent is NOT enabled")
+
+    monkeypatch.setattr(discord_bot, "verify_discord_access", refuse)
+
+    with pytest.raises(SystemExit) as error:
+        discord_bot.main(["--check-only"])
+    assert "Message Content Intent is NOT enabled" in str(error.value)
 
 
 def test_check_only_warns_when_every_channel_is_allowed(monkeypatch, capsys) -> None:
     monkeypatch.setattr(discord_bot, "bot_settings", lambda: settings())
+    monkeypatch.setattr(discord_bot, "verify_discord_access", lambda settings: [])
     discord_bot.main(["--check-only"])
     assert "allowed_channel_ids" in capsys.readouterr().out
 
@@ -464,3 +502,113 @@ def test_bot_settings_defaults_to_the_project_triggers(monkeypatch) -> None:
     configured = discord_bot.bot_settings()
     assert configured.triggers == tuple(trigger.lower() for trigger in DEFAULT_TRIGGERS)
     assert configured.days_ago == 0
+
+
+# --- the online preflight --------------------------------------------------
+#
+# Two things only Discord knows, and both of them were met for real: a token that
+# was reset after it was copied into .env, and a Message Content intent that was
+# never switched on. Under systemd either one shows up as a service that restarts
+# forever, so --check-only asks first.
+
+
+class FakeResponse:
+    def __init__(self, body: bytes = b"") -> None:
+        self.body = body
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def capture_api(monkeypatch, payload=None, error=None) -> dict:
+    """Intercept urlopen and record the Request that was built."""
+    captured: dict = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        if error is not None:
+            raise error
+        return FakeResponse(json.dumps(payload or {}).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def http_error(code: int, body: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://discord.com/api/v10/applications/@me",
+        code,
+        "error",
+        None,
+        io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def test_the_online_check_reports_the_application_and_the_intent(monkeypatch) -> None:
+    capture_api(monkeypatch, {"name": "Cat monitor assistant", "flags": MESSAGE_CONTENT_FLAG})
+
+    notes = verify_discord_access(settings())
+    assert any("Cat monitor assistant" in note for note in notes)
+    assert any("Message Content Intent: enabled" in note for note in notes)
+
+
+def test_the_online_check_sends_a_bot_authorization_header(monkeypatch) -> None:
+    """Bots use ``Bot <token>``, not ``Bearer``: bearer is answered with 401."""
+    captured = capture_api(monkeypatch, {"name": "x", "flags": MESSAGE_CONTENT_FLAG})
+
+    verify_discord_access(settings(token="abc123"))
+    request = captured["request"]
+    assert request.get_header("Authorization") == "Bot abc123"
+    # Cloudflare answers a missing User-Agent with 403 / error 1010.
+    assert "python-urllib" not in (request.get_header("User-agent") or "").lower()
+    assert request.full_url.endswith("/applications/@me")
+
+
+def test_the_limited_flag_is_not_reported_as_off(monkeypatch) -> None:
+    """On-but-limited means the intent works; only >=100 servers lose content."""
+    capture_api(
+        monkeypatch,
+        {"name": "x", "flags": MESSAGE_CONTENT_FLAG | MESSAGE_CONTENT_LIMITED_FLAG},
+    )
+    notes = verify_discord_access(settings())
+    assert any("limited" in note for note in notes)
+
+
+def test_the_online_check_refuses_a_token_without_the_intent(monkeypatch) -> None:
+    """This is the failure that burned a whole systemd restart budget."""
+    capture_api(monkeypatch, {"name": "x", "flags": 0})
+
+    with pytest.raises(DiscordCheckError) as error:
+        verify_discord_access(settings())
+    message = str(error.value)
+    assert "Message Content Intent is NOT enabled" in message
+    # The advice has to say where to click, in the portal's own wording.
+    assert "Privileged Gateway Intents" in message
+    assert "Save Changes" in message
+
+
+def test_a_reset_token_is_explained_rather_than_named(monkeypatch) -> None:
+    capture_api(monkeypatch, error=http_error(401, '{"message": "401: Unauthorized"}'))
+
+    with pytest.raises(DiscordCheckError) as error:
+        verify_discord_access(settings())
+    message = str(error.value)
+    assert "401" in message
+    assert "reset" in message
+    # The token itself must never end up in an error message or a log line.
+    assert "test-token" not in message
+
+
+def test_an_unreachable_discord_is_reported(monkeypatch) -> None:
+    capture_api(monkeypatch, error=urllib.error.URLError("no route to host"))
+
+    with pytest.raises(DiscordCheckError) as error:
+        verify_discord_access(settings())
+    assert "could not reach Discord" in str(error.value)

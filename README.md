@@ -253,9 +253,18 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
    History* in whichever channel it should answer in.
 
 ```bash
-scripts/run_discord_bot.sh --check-only    # validates the config, connects nothing
+scripts/run_discord_bot.sh --check-only    # validate config and ask Discord two questions
+scripts/run_discord_bot.sh --offline --check-only   # ...without the network
 scripts/run_discord_bot.sh                 # run it in the foreground
 ```
+
+`--check-only` never opens the Gateway, but it does ask Discord two things that
+cannot be answered locally and that both turn into a service restarting forever:
+is the token still valid (a reset token is otherwise only discovered from
+`journalctl`), and is **Message Content Intent** on. The answer comes from the
+application's own flags in `GET /applications/@me`, and the intent being off is
+reported with the exact portal path to fix it - the Gateway would refuse the
+connection with `PrivilegedIntentsRequired`.
 
 Then say this in the channel:
 
@@ -297,9 +306,9 @@ journalctl --user -u cat-discord -f            # live bot log
 ```
 
 `install_services.sh` preflights each unit before starting it, so a missing
-camera URL or a missing `DISCORD_BOT_TOKEN` leaves the unit **enabled but not
-started** instead of burning its restart budget. Re-run it after adding the
-token.
+camera URL or a bot that fails its checks is left **enabled but not started** -
+with the reason printed instead of a unit that restarts forever. Re-run it after
+fixing whatever it named.
 
 Two details worth knowing:
 

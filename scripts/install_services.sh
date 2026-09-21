@@ -45,9 +45,11 @@ fi
 
 systemctl --user enable --now cat-report.timer
 
-# Starting the tracker when a camera URL is missing only produces a failed unit
-# and burns the restart budget, so ask the launcher's own preflight first.
-if TRACKER_CHECK_ONLY=1 "$PROJECT_ROOT/scripts/run_tracker.sh" >/dev/null 2>&1; then
+# Starting a service whose preflight already fails only produces a failed unit and
+# burns its restart budget, so each launcher is asked first. The reason is kept
+# rather than discarded: "enabled, NOT started" on its own is the least useful
+# message this script could print.
+if tracker_preflight="$(TRACKER_CHECK_ONLY=1 "$PROJECT_ROOT/scripts/run_tracker.sh" 2>&1)"; then
     systemctl --user enable --now cat-tracker.service
     tracker_state="started"
 else
@@ -55,8 +57,10 @@ else
     tracker_state="enabled, NOT started"
 fi
 
-# Same reasoning for the bot: without a token it would only burn its restart budget.
-if "$PROJECT_ROOT/scripts/run_discord_bot.sh" --check-only >/dev/null 2>&1; then
+# Same reasoning for the bot. Its preflight also asks Discord whether the token is
+# still valid and Message Content Intent is on, because either answer being wrong
+# means the service can only restart forever.
+if bot_preflight="$("$PROJECT_ROOT/scripts/run_discord_bot.sh" --check-only 2>&1)"; then
     systemctl --user enable --now cat-discord.service
     bot_state="started"
 else
@@ -88,8 +92,11 @@ EOF
 
 if [[ "$tracker_state" != "started" ]]; then
     echo
-    echo "The tracker did not start because its preflight failed. Run it directly"
-    echo "to see why, then start the service:"
+    echo "The tracker did not start because its preflight failed:"
+    echo
+    printf '%s\n' "$tracker_preflight"
+    echo
+    echo "Fix that, then start the service:"
     echo
     echo "    ./scripts/run_tracker.sh"
     echo "    systemctl --user start cat-tracker.service"
@@ -97,8 +104,11 @@ fi
 
 if [[ "$bot_state" != "started" ]]; then
     echo
-    echo "The bot did not start because its preflight failed (usually a missing"
-    echo "DISCORD_BOT_TOKEN in .env). Run it to see why, then start the service:"
+    echo "The bot did not start because its preflight failed:"
+    echo
+    printf '%s\n' "$bot_preflight"
+    echo
+    echo "Fix that, then start the service:"
     echo
     echo "    ./scripts/run_discord_bot.sh --check-only"
     echo "    systemctl --user start cat-discord.service"
