@@ -122,6 +122,24 @@ report:
     toilet_window_seconds: 300
     # 至少出现几次才算真的用了厕所（少于这个数算路过）
     toilet_min_appearances: 2
+    # 吃饭/喝水区域。判定方式和厕所相反：看「待了多久」，不看「出现几次」。
+    # 在喂食器或饭碗边待够 feeding_min_seconds 就算吃了一顿；路过不算。
+    # 原因：模型回答「bagel 今天吃饭了吗」时自己发明了一条标准（"正经吃饭"
+    # vs "蹲在那儿"），而且对两只猫用得不一样 —— 同样 2~5 分钟的喂食器停留，
+    # 一只是「吃了」、另一只是「只蹲了会儿」。吃什么算吃是一条定义，
+    # 定义必须写在代码里，不能交给模型临时决定。
+    feeding_zones:
+      - feeder_1
+      - wet_food_bowl_1
+      - wet_food_bowl_2
+    water_zones:
+      - water_server
+    # 单次停留超过这个秒数才算吃/喝。路过的停留只有几秒，进不了这个门槛。
+    feeding_min_seconds: 30
+    # 两次停留之间的间隔小于这个秒数就并成同一顿：从喂食器走到湿粮碗、
+    # 或者中间去喝了口水，都还是同一顿饭。这一点比厕所规则宽松是有意的 ——
+    # 离开食盆两分钟再回来是同一顿，离开猫砂盆再回来就是第二次了。
+    feeding_merge_seconds: 120
   llm:
     endpoint: ${LLM_ENDPOINT:https://api.deepseek.com/chat/completions}
     model: ${LLM_MODEL:deepseek-chat}

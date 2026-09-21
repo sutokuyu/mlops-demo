@@ -57,24 +57,42 @@ MAX_REPORT_CHARACTERS = 600
 DEFAULT_TOILET_WINDOW_SECONDS = 300.0
 DEFAULT_TOILET_MIN_APPEARANCES = 2
 
+# Feeding is judged by how long the cat stayed, not by how many times it appeared:
+# one 3-minute stay at the feeder is a meal, and a cat walking past is not.
+# ``merge`` glues a meal back together when the cat steps between the feeder and a
+# food bowl, or stops for water in the middle.
+DEFAULT_FEEDING_MIN_SECONDS = 30.0
+DEFAULT_FEEDING_MERGE_SECONDS = 120.0
+
 # What the message must contain. Not configurable: it follows from what the
 # tracker records, and a report that silently drops meals or toilet visits is
 # wrong no matter how nicely it is written.
 TASK = (
     "Report what each cat did today: how long it stayed in each location, which location "
-    "it preferred, and any notable routine or movement. Meals and water always matter. "
-    "Add the exact time of the cat's final appearance."
+    "it preferred, and any notable routine or movement. Meals and water always matter: "
+    "say whether the cat ate and drank, using the verdicts in `events`. Add the exact "
+    "time of the cat's final appearance."
 )
 
 # The toilet rules used to live in `hints` and the model had to apply them by
 # comparing timestamps in the timeline. Measured over eleven runs it was right
 # about a third of the time, and rewording only traded false positives for
 # omissions, so the verdict is now computed and handed over as a fact.
+#
+# Feeding went the same way later, for a different reason: asked "did bagel eat
+# today?", the model invented a criterion of its own ("did it really eat, or just
+# sit by the bowl?") and then failed to apply it evenly - the same two-to-five
+# minute feeder visit was a meal for one cat and not a meal for the other. What
+# counts as eating is a definition, and a definition belongs in code.
 EVENTS = (
-    "Toilet sightings are not part of `locations` or `timeline`: they are turned into "
-    "`events` instead. A `toilet_use` entry there is a confirmed visit, with the exact "
-    "time it started and ended. Report those. A cat with no `toilet_use` entry did not use "
-    "the toilet, no matter where it was seen."
+    "Some zone visits are turned into verdicts in `events` rather than left to you, "
+    "because deciding them from a text timeline is unreliable and comes out "
+    "inconsistent between the two cats. `toilet_use` is a confirmed toilet visit, and "
+    "those sightings are removed from `locations` and `timeline`. `meal` is a confirmed "
+    "meal and `drinking` is a confirmed drink: the cat was at a feeder, food bowl or "
+    "water bowl long enough to be using it. Report the verdicts as given, with their "
+    "times. A cat with no `meal` entry did not eat today, no matter how long it sat "
+    "next to a bowl, and a cat with no `toilet_use` entry did not use the toilet."
 )
 
 # Its own block because it needs to be unambiguous: folding "write in zh" into TASK
@@ -186,6 +204,66 @@ def toilet_events(visits: list, zones: set[str], window: float, minimum: int) ->
     return events
 
 
+def feeding_events(
+    visits: list,
+    zones: set[str],
+    minimum_seconds: float,
+    merge_seconds: float,
+    kind: str,
+) -> list[dict]:
+    """The meals (or drinks) a cat definitely had, decided here rather than by the model.
+
+    The toilet verdict can lean on "it went in and came out", which is two
+    appearances. Feeding cannot: a single three-minute stay at the feeder is a
+    meal, and a cat trotting past is not, so the discriminator is the dwell time.
+
+    Groups are merged by the gap between one visit's end and the next one's start,
+    and a group may span zones - stepping from `feeder_1` to `wet_food_bowl_1`, or
+    pausing at the water server, is one meal. That is deliberately looser than the
+    toilet rule, which is cut by any other location: leaving the feeder for two
+    minutes and coming back is the same sitting, whereas leaving the litter box and
+    coming back is a second visit.
+
+    A visit that is too short is skipped without ending the group; only time does.
+    """
+    if not zones:
+        return []
+
+    tz = ZoneInfo(REPORT_CONFIG["timezone"])
+    events: list[dict] = []
+    group: list = []
+
+    def clock(stamp: float) -> str:
+        return datetime.fromtimestamp(stamp, tz).strftime("%H:%M:%S")
+
+    def flush() -> None:
+        if not group:
+            return
+        events.append(
+            {
+                "kind": kind,
+                "zones": sorted({visit.zone for visit in group}),
+                "start": clock(group[0].start_ts),
+                "end": clock(group[-1].end_ts),
+                # Summed dwell, not wall clock: a cat that napped halfway through
+                # did not spend that time at the bowl.
+                "minutes": round(sum(visit.end_ts - visit.start_ts for visit in group) / 60, 1),
+            }
+        )
+        group.clear()
+
+    for visit in visits:  # ordered by start_ts by the query
+        if visit.zone not in zones:
+            continue
+        if visit.end_ts - visit.start_ts < minimum_seconds:
+            continue
+        if group and visit.start_ts - group[-1].end_ts > merge_seconds:
+            flush()
+        group.append(visit)
+    flush()
+    return events
+
+
 def build_summary(day: date_type, database: Path | None = None) -> dict:
     tz = ZoneInfo(REPORT_CONFIG["timezone"])
     start_ts, end_ts = day_bounds(day, tz)
@@ -201,6 +279,10 @@ def build_summary(day: date_type, database: Path | None = None) -> dict:
     toilet_minimum = int(
         events_config.get("toilet_min_appearances", DEFAULT_TOILET_MIN_APPEARANCES)
     )
+    feeding_zones = set(events_config.get("feeding_zones") or [])
+    water_zones = set(events_config.get("water_zones") or [])
+    feeding_minimum = float(events_config.get("feeding_min_seconds", DEFAULT_FEEDING_MIN_SECONDS))
+    feeding_merge = float(events_config.get("feeding_merge_seconds", DEFAULT_FEEDING_MERGE_SECONDS))
 
     totals: dict[str, dict[str, float]] = {}
     timeline: dict[str, list[dict]] = {}
@@ -239,9 +321,25 @@ def build_summary(day: date_type, database: Path | None = None) -> dict:
         "cats": [
             {
                 "cat": cat,
-                "events": toilet_events(
-                    by_cat.get(cat, []), toilet_zones, toilet_window, toilet_minimum
-                ),
+                "events": [
+                    *toilet_events(
+                        by_cat.get(cat, []), toilet_zones, toilet_window, toilet_minimum
+                    ),
+                    *feeding_events(
+                        by_cat.get(cat, []),
+                        feeding_zones,
+                        feeding_minimum,
+                        feeding_merge,
+                        "meal",
+                    ),
+                    *feeding_events(
+                        by_cat.get(cat, []),
+                        water_zones,
+                        feeding_minimum,
+                        feeding_merge,
+                        "drinking",
+                    ),
+                ],
                 "locations": [
                     {"location": location, "minutes": round(seconds / 60, 1)}
                     for location, seconds in sorted(

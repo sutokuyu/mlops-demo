@@ -29,6 +29,7 @@ from src.monitoring.location_report import (
     build_summary,
     call_llm,
     day_bounds,
+    feeding_events,
     llm_temperature,
     post_json,
     toilet_events,
@@ -475,3 +476,128 @@ def test_the_events_block_says_the_toilet_is_missing_from_the_timeline() -> None
     assert EVENTS in build_instruction("zh")
     assert "toilet_use" in EVENTS
     assert "timeline" in EVENTS
+
+
+# --- meal verdict -----------------------------------------------------------
+#
+# Asked "did bagel eat today?", the model invented a criterion of its own ("did it
+# really eat, or just sit by the bowl?") and then failed to apply it evenly: the
+# same two-to-five minute feeder visit was a meal for one cat and not a meal for
+# the other. What counts as eating is a definition, so it is computed here.
+#
+# Feeding cannot use the toilet rule ("went in and came out" = two appearances):
+# one three-minute stay is a meal, so the discriminator is the dwell time.
+
+FEEDING_ZONES = {"feeder_1", "wet_food_bowl_1"}
+WATER_ZONES = {"water_server"}
+
+
+def meal(seconds: float, zone: str = "feeder_1", duration: float = 180.0) -> object:
+    return as_visit(sighting(seconds, zone=zone, end=duration))
+
+
+def test_a_long_enough_stay_at_the_feeder_is_a_meal() -> None:
+    events = feeding_events([meal(0)], FEEDING_ZONES, 30.0, 120.0, "meal")
+
+    assert len(events) == 1
+    assert events[0]["kind"] == "meal"
+    assert events[0]["zones"] == ["feeder_1"]
+    assert events[0]["minutes"] == pytest.approx(3.0)
+
+
+def test_a_pass_by_is_not_a_meal() -> None:
+    """Ten seconds at the feeder is walking past it."""
+    assert feeding_events([meal(0, duration=10.0)], FEEDING_ZONES, 30.0, 120.0, "meal") == []
+
+
+def test_moving_between_the_feeder_and_a_bowl_is_one_meal() -> None:
+    """Stepping between dishes is one sitting, not two meals."""
+    visits = [
+        meal(0, zone="feeder_1", duration=120.0),
+        meal(180, zone="wet_food_bowl_1", duration=90.0),
+    ]
+
+    events = feeding_events(visits, FEEDING_ZONES, 30.0, 120.0, "meal")
+    assert len(events) == 1
+    assert events[0]["zones"] == ["feeder_1", "wet_food_bowl_1"]
+    assert events[0]["minutes"] == pytest.approx(3.5)
+
+
+def test_a_real_break_splits_the_meal() -> None:
+    visits = [
+        meal(0, duration=120.0),
+        meal(600, duration=120.0),
+    ]
+
+    assert len(feeding_events(visits, FEEDING_ZONES, 30.0, 120.0, "meal")) == 2
+
+
+def test_water_is_its_own_kind_of_event() -> None:
+    events = feeding_events([meal(0, zone="water_server")], WATER_ZONES, 30.0, 120.0, "drinking")
+
+    assert len(events) == 1
+    assert events[0]["kind"] == "drinking"
+    assert events[0]["zones"] == ["water_server"]
+
+
+def test_feeding_is_off_without_configured_zones() -> None:
+    visits = [meal(0)]
+    assert feeding_events(visits, set(), 30.0, 120.0, "meal") == []
+
+
+def test_both_cats_are_judged_by_the_same_rule(tmp_path: Path) -> None:
+    """The regression this rule exists for.
+
+    Two cats with the same 4-minute feeder visit must get the same verdict. The
+    model gave one a meal and told the owner the other "did not really eat".
+    """
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    for cat, offset in (("bagel", 600), ("kurumi", 900)):
+        visit_id = store.open_visit(start_ts + offset, cat, "feeder", "feeder_1", 0.9)
+        store.touch_visit(visit_id, start_ts + offset + 240, 3, 0.9)
+    store.close()
+
+    summary = build_summary(day, database)
+    verdicts = {
+        entry["cat"]: [event["kind"] for event in entry["events"]] for entry in summary["cats"]
+    }
+    assert verdicts == {"bagel": ["meal"], "kurumi": ["meal"]}
+
+
+def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(tmp_path: Path) -> None:
+    """Unlike the toilet, the raw dwell is useful: the verdict does not replace it.
+
+    Dropping the feeding rows would hide how long the cat actually spent at the
+    bowl. and unlike a toilet sighting they cannot contradict the verdict - the
+    verdict is derived from exactly those rows.
+    """
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    visit_id = store.open_visit(start_ts + 60, "bagel", "feeder", "feeder_1", 0.9)
+    store.touch_visit(visit_id, start_ts + 300, 3, 0.9)
+    # A toilet sighting in the same day, which IS removed.
+    toilet = store.open_visit(start_ts + 900, "bagel", "feeder", "toilet_1", 0.9)
+    store.touch_visit(toilet, start_ts + 920, 2, 0.9)
+    second = store.open_visit(start_ts + 1200, "bagel", "feeder", "toilet_1", 0.9)
+    store.touch_visit(second, start_ts + 1220, 2, 0.9)
+    store.close()
+
+    bagel = build_summary(day, database)["cats"][0]
+    assert [event["kind"] for event in bagel["events"]] == ["toilet_use", "meal"]
+    assert "feeder_1" in [entry["zone"] for entry in bagel["timeline"]]
+    assert "toilet_1" not in [entry["zone"] for entry in bagel["timeline"]]
+
+
+def test_the_prompt_says_what_the_meal_verdict_means() -> None:
+    assert "meal" in EVENTS
+    assert "drinking" in EVENTS
+    assert "did not eat" in EVENTS
+    # Meals have to be asked for explicitly, since that is what the owner asks about.
+    assert "ate and drank" in TASK
