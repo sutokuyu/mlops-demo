@@ -8,6 +8,7 @@ redraw the zones if needed.
 """
 
 import argparse
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.monitoring.alert_voice import phrase_alert
 from src.monitoring.alignment import (
     USE_FRAME,
     ReferenceFeatures,
@@ -127,6 +129,47 @@ def _relative(path: Path) -> str:
         return str(path)
 
 
+def describe_reason(reason: str) -> str:
+    """Chinese gloss for a machine reason, so the alert reads like a sentence.
+
+    ``estimate_alignment``'s reasons are precise and machine-shaped ("only 10
+    feature matches"). They stay in the console log as they are; this is what the
+    owner and the LLM are told the failure means.
+    """
+    for pattern, gloss in (
+        (
+            r"reference frame has too few features",
+            "参考帧本身几乎找不到可匹配的特征（当初这张参考帧可能就是糊的）",
+        ),
+        (
+            r"current frame has too few features",
+            "当前画面几乎找不到可匹配的特征（可能太暗、太糊或者被挡住了）",
+        ),
+        (r"only (\d+) feature matches", r"画面里能跟参考帧对上号的点只剩 \1 个，不够定位"),
+        (r"only (\d+) inliers after RANSAC", r"对上号的点里只有 \1 个能拼出一致的变换"),
+        (r"transform could not be estimated", "点够多了，但拼不出一个可信的变换"),
+    ):
+        if re.fullmatch(pattern, reason):
+            return re.sub(pattern, gloss, reason)
+    return reason
+
+
+def _notifications_enabled(settings: dict) -> bool:
+    return bool(settings.get("discord_webhook")) and settings.get("notify") is not False
+
+
+def _alert_content(event: str, settings: dict, facts: dict, fallback: str) -> str:
+    """Phrase an alert, but only when it is actually going to be sent.
+
+    Skipping the call when notifications are off keeps the tracker from spending a
+    network round trip - inside its sampling loop - on a message that will be
+    dropped anyway.
+    """
+    if not _notifications_enabled(settings):
+        return fallback
+    return phrase_alert(event, facts, fallback)
+
+
 def _notify(settings: dict, camera: str, content: str, attachment: Path | None) -> tuple[bool, str]:
     """Send a Discord message and report whether it actually went out.
 
@@ -134,7 +177,7 @@ def _notify(settings: dict, camera: str, content: str, attachment: Path | None) 
     Discord holds the image, a local copy is duplicated storage that piles up.
     """
     webhook_url = settings.get("discord_webhook") or ""
-    if not webhook_url or settings.get("notify") is False:
+    if not _notifications_enabled(settings):
         return False, "notification skipped (no webhook configured)"
     try:
         post_discord_message(
@@ -189,6 +232,7 @@ def reanchor(
         # them and simply adopt the current frame as the new reference.
         projected = list(calibration.zones)
         mode = "initial reference frame"
+        mode_zh = "区域是在这个画面上直接画的，原样保留"
     else:
         result = estimate_alignment(
             reference,
@@ -209,15 +253,11 @@ def reanchor(
             # What the failure means depends on the configured fallback.
             if settings.get("on_alignment_failure") == USE_FRAME:
                 advice = (
-                    "Zones are still resolved from the frame as captured and those samples "
-                    "are recorded with `alignment_quality=failed`. Re-save the zones in the "
-                    "editor to adopt the current lighting as the reference."
+                    "区域仍然按当前画面解析，所以位置还能用，这些样本事后也能筛掉。"
+                    "如果看着不对，请在标注页面重新保存一次区域，把现在的光线当成新的参考帧。"
                 )
             else:
-                advice = (
-                    "The previous zones are kept and locations fall back to the camera name. "
-                    "Please run the zone editor to redraw them."
-                )
+                advice = "旧区域还会继续用，但位置会退化成相机名字。请打开标注页面重画区域。"
             overlay = render_overlay(
                 frame,
                 [],
@@ -226,10 +266,22 @@ def reanchor(
             )
             overlay_path = camera_dir / f"reanchor_failed_{calibration_id}.jpg"
             cv2.imwrite(str(overlay_path), overlay)
-            content = (
-                f"⚠️ Camera `{calibration.camera}` could not be re-anchored automatically.\n"
-                f"Reason: {result.reason}\n"
+            plain = (
+                f"⚠️ `{calibration.camera}` 自动重新锚定没成功。\n"
+                f"原因：{describe_reason(result.reason)}\n"
                 f"{advice}"
+            )
+            content = _alert_content(
+                "reanchor_failed",
+                settings,
+                {
+                    "摄像头": calibration.camera,
+                    "结果": "想自动重新锚定，但失败了",
+                    "失败原因": describe_reason(result.reason),
+                    "位置现在还能不能用": settings.get("on_alignment_failure") == USE_FRAME,
+                    "需要主人做什么": advice,
+                },
+                plain,
             )
             delivered, note = _notify(settings, calibration.camera, content, overlay_path)
             if delivered:
@@ -249,6 +301,7 @@ def reanchor(
         ]
         transform_note = describe_transform(result.matrix)
         mode = "zones projected from the previous reference frame"
+        mode_zh = "把旧参考帧上的区域投影到新的参考帧"
 
     off_frame = tuple(
         zone.name
@@ -274,17 +327,36 @@ def reanchor(
     save_calibrations(calibrations, zones_path)
 
     lines = [
-        f"🔄 Camera `{calibration.camera}` re-anchored to a new reference frame.",
-        f"Calibration: `{calibration_id}`",
-        f"{mode}",
+        f"🔄 `{calibration.camera}` 已经重新锚定到新的参考帧。",
+        f"区域处理方式：{mode_zh}",
     ]
     if transform_note:
-        lines.append(f"Transform: {transform_note}")
-    lines.append(f"Zones: {len(projected)}")
+        lines.append(f"变换：{transform_note}")
+    lines.append(f"区域数量：{len(projected)}")
     if off_frame:
-        lines.append(f"⚠️ These zones are off-frame now: {', '.join(off_frame)}")
-    lines.append("Check the overlay image; redraw the zones if the alignment looks wrong.")
-    _, note = _notify(settings, calibration.camera, "\n".join(lines), overlay_path)
+        lines.append(f"⚠️ 这些区域现在跑到画面外了：{', '.join(off_frame)}")
+    lines.append("看一眼下面的图确认区域没歪；歪了就手动重画。")
+    needs_hand = bool(off_frame)
+    plain = "\n".join(lines)
+    content = _alert_content(
+        "reanchor_ok",
+        settings,
+        {
+            "摄像头": calibration.camera,
+            "结果": "已经自动重新锚定到新的参考帧",
+            "区域处理方式": mode_zh,
+            "区域数量": len(projected),
+            "摄像头位置变化的量级": transform_note or "没有需要补偿的变化",
+            "跑到画面外的区域": list(off_frame) or "没有",
+            "需要主人做什么": (
+                "有区域跑到画面外了，需要主人手动重画"
+                if needs_hand
+                else "不用动手，看一眼下面的图确认一下就行"
+            ),
+        },
+        plain,
+    )
+    _, note = _notify(settings, calibration.camera, content, overlay_path)
 
     return ReanchorOutcome(
         True, updated, f"{mode}; {note}", overlay_path, transform_note, off_frame

@@ -411,6 +411,83 @@ def test_reanchor_without_previous_reference_adopts_the_current_frame(reanchor_s
     assert outcome.calibration.reference_path.is_file()
 
 
+def live_settings(settings) -> dict:
+    """The fixture with notifications switched on, so the wording path is reached.
+
+    ``on_alignment_failure`` is part of it because the real
+    ``alignment_settings()`` always passes it, and it changes the advice the owner
+    is given.
+    """
+    return {
+        **settings,
+        "notify": True,
+        "discord_webhook": "https://example.invalid/hook",
+        "on_alignment_failure": USE_FRAME,
+    }
+
+
+def test_the_alert_text_comes_from_the_wording_layer(reanchor_settings, monkeypatch) -> None:
+    """Discord gets the phrased sentence; the machine line stays in the log.
+
+    The facts handed over are the ones a human would need - which camera, what
+    happened, whether the owner has to do anything - with the machine-shaped reason
+    already glossed, so the model has nothing to guess at.
+    """
+    settings = live_settings(reanchor_settings)
+    zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
+    calibration = calibrated_camera(settings, settings, zones, make_texture())
+    blank = np.full((HEIGHT, WIDTH, 3), 127, np.uint8)
+
+    calls: list[tuple[str, dict, str]] = []
+    monkeypatch.setattr(
+        recalibration,
+        "phrase_alert",
+        lambda event, facts, fallback: (
+            calls.append((event, facts, fallback)) or "被碰歪了但本鱼没对上"
+        ),
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        recalibration,
+        "_notify",
+        lambda settings, camera, content, attachment: (sent.append(content), (True, "sent"))[1],
+    )
+
+    outcome = recalibration.reanchor(calibration, blank, settings)
+
+    assert not outcome.ok
+    assert sent == ["被碰歪了但本鱼没对上"], "the phrasing layer decides what is sent"
+    event, facts, fallback = calls[0]
+    assert event == "reanchor_failed"
+    assert facts["摄像头"] == "living_room"
+    assert "特征" in facts["失败原因"], "the machine reason is glossed before it is handed over"
+    assert facts["位置现在还能不能用"] is True
+    assert "自动重新锚定" in fallback, "and a mechanical sentence waits behind it"
+
+
+def test_a_dropped_alert_is_not_worth_asking_the_model_about(
+    reanchor_settings, monkeypatch
+) -> None:
+    """Notifications off means no LLM round trip either.
+
+    This runs inside the sampling loop, so an unnecessary request delays every
+    camera, not just this alert.
+    """
+    zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
+    calibration = calibrated_camera(reanchor_settings, reanchor_settings, zones, make_texture())
+    blank = np.full((HEIGHT, WIDTH, 3), 127, np.uint8)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the wording layer must not be consulted")
+
+    monkeypatch.setattr(recalibration, "phrase_alert", refuse)
+
+    outcome = recalibration.reanchor(calibration, blank, reanchor_settings)
+
+    assert not outcome.ok
+    assert "notification skipped" in outcome.message
+
+
 def test_store_migration_adds_columns_to_an_existing_database(tmp_path) -> None:
     database = tmp_path / "legacy.db"
     connection = sqlite3.connect(str(database))

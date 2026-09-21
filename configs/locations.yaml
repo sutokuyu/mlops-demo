@@ -148,6 +148,16 @@ report:
     #    注意：能用代码算出来的规则不要写在这里。比如厕所的判定规则已经
     #    移到上面的 report.events，写在这里会和代码算出的结论打架。
     hints: ""
+    # 告警（重锚成功/失败）的文案也交给 LLM 润色，共用上面的
+    # endpoint / model / api_key / persona。
+    # LLM 关掉、连不上、超时或者回答得没法用，都会自动退回代码里的机械文案，
+    # 不会因为润色失败而丢掉告警；技术细节同时留在控制台日志里。
+    alerts:
+      enabled: true
+      # 只覆盖告警的写法；persona 留空就沿用日报那份人设（同一个机器人说话）。
+      style: |
+        一两句话，说清哪台摄像头、发生了什么、主人要不要动手。
+        只许使用给出的「事实」，不要补充时间地点，不要编造数字。
   http:
     url: ${LOCATION_REPORT_URL:}
     token: ${LOCATION_REPORT_TOKEN:}
