@@ -22,7 +22,7 @@ preview:
 
 tracking:
   sample_interval_seconds: 5.0
-  confidence_threshold: 0.50
+  confidence_threshold: 0.3
   imgsz: 640
   device: 0
   # Consecutive samples required before accepting a zone change, to avoid
