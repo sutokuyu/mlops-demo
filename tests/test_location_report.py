@@ -33,6 +33,7 @@ from src.monitoring.location_report import (
     llm_temperature,
     post_json,
     toilet_events,
+    toilet_region_events,
 )
 from src.monitoring.location_store import LocationStore
 
@@ -395,6 +396,22 @@ def as_visit(entry: dict):
     return visit
 
 
+@pytest.fixture
+def zone_only_events(monkeypatch):
+    """Run build_summary with the zone-based toilet rule.
+
+    This room configures ``toilet_region``, which supersedes it because the box
+    hides the cat. The zone path is still what an open box would use, so it keeps
+    its own tests - they just have to say which rule they are testing.
+    """
+    without_region = {
+        key: value
+        for key, value in location_report.REPORT_CONFIG["events"].items()
+        if key != "toilet_region"
+    }
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "events", without_region)
+
+
 def test_toilet_events_merges_sightings_of_one_visit() -> None:
     """Going in and coming out is one visit, not two."""
     events = toilet_events([as_visit(sighting(0)), as_visit(sighting(130))], TOILET_ZONES, 300.0, 2)
@@ -434,7 +451,7 @@ def test_toilet_events_is_off_without_configured_zones() -> None:
 
 
 def test_build_summary_hides_raw_toilet_sightings_and_reports_the_verdict(
-    tmp_path: Path,
+    tmp_path: Path, zone_only_events
 ) -> None:
     """The model must not be able to reach a toilet sighting on its own.
 
@@ -568,7 +585,9 @@ def test_both_cats_are_judged_by_the_same_rule(tmp_path: Path) -> None:
     assert verdicts == {"bagel": ["meal"], "kurumi": ["meal"]}
 
 
-def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(tmp_path: Path) -> None:
+def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(
+    tmp_path: Path, zone_only_events
+) -> None:
     """Unlike the toilet, the raw dwell is useful: the verdict does not replace it.
 
     Dropping the feeding rows would hide how long the cat actually spent at the
@@ -601,3 +620,165 @@ def test_the_prompt_says_what_the_meal_verdict_means() -> None:
     assert "did not eat" in EVENTS
     # Meals have to be asked for explicitly, since that is what the owner asks about.
     assert "ate and drank" in TASK
+
+
+# --- toilet verdict from the region -----------------------------------------
+#
+# An enclosed litter box hides the cat. Measured against the smart litter box's own
+# log (six uses on 2026-09-21): inside the box the tracker either loses the cat or
+# sees a box whose bottom edge sits on the floor in front, so the zone comes back as
+# `floor` or empty - and the visit gate (two consecutive agreeing samples) then never
+# opens a visit. `visits` has not held a single `toilet_1` row in its whole history.
+#
+# So membership is geometric and the evidence is appearances, not dwell time: a cat
+# that steps in and out of a box is hidden for most of the visit.
+
+REGION = {"camera": "feeder", "x_min": 0.44, "x_max": 0.72, "y_min": 0.70, "y_max": 1.01}
+GAP_SECONDS = 300.0
+MIN_SAMPLES = 2
+CONFIRM_SECONDS = 30.0
+CONFIRM_SAMPLES = 4
+
+
+def appearance(seconds: float, x: float = 0.60, y: float = 0.95, camera: str = "feeder"):
+    class Observation:
+        pass
+
+    observation = Observation()
+    observation.__dict__.update(
+        {"ts": BASE_TS + seconds, "camera": camera, "norm_x": x, "norm_y": y}
+    )
+    return observation
+
+
+def region_events(observations, busy_spans=None):
+    return toilet_region_events(
+        observations,
+        REGION,
+        GAP_SECONDS,
+        MIN_SAMPLES,
+        CONFIRM_SECONDS,
+        CONFIRM_SAMPLES,
+        busy_spans or [],
+    )
+
+
+def test_two_appearances_at_the_box_are_a_visit() -> None:
+    events = region_events([appearance(0), appearance(5)])
+
+    assert len(events) == 1
+    assert events[0]["kind"] == "toilet_use"
+    # Five seconds of evidence is a sighting, not a confirmed visit.
+    assert events[0]["certainty"] == "brief"
+    assert events[0]["start"] != events[0]["end"]
+
+
+def test_a_single_appearance_is_not_a_visit() -> None:
+    """One sample at the box is the cat walking past it."""
+    assert region_events([appearance(0)]) == []
+
+
+def test_a_cat_that_stays_at_the_box_is_confirmed() -> None:
+    """Dwell counts, because a cat hidden inside the box is seen rarely."""
+    events = region_events([appearance(0), appearance(60)])
+
+    assert len(events) == 1
+    assert events[0]["certainty"] == "confirmed"
+    assert events[0]["minutes"] == pytest.approx(1.0)
+
+
+def test_many_appearances_in_a_moment_are_confirmed() -> None:
+    """A cat crossing the region quickly can be seen several times inside a second."""
+    events = region_events([appearance(offset) for offset in (0, 2, 4, 6)])
+
+    assert len(events) == 1
+    assert events[0]["certainty"] == "confirmed"
+
+
+def test_appearances_a_long_time_apart_are_two_visits() -> None:
+    visits = [appearance(0), appearance(5), appearance(400), appearance(405)]
+
+    events = region_events(visits)
+    assert len(events) == 2
+
+
+def test_an_appearance_elsewhere_is_not_a_box_visit() -> None:
+    """The region is geometry, and it belongs to one camera."""
+    outside = [appearance(0, x=0.30), appearance(5, x=0.30), appearance(0, y=0.50)]
+    other_camera = [appearance(0, camera="sofa"), appearance(5, camera="sofa")]
+
+    assert region_events(outside) == []
+    assert region_events(other_camera) == []
+
+
+def test_the_region_rule_is_off_without_a_region() -> None:
+    assert toilet_region_events([appearance(0), appearance(5)], None, 300.0, 2, 30.0, 4, []) == []
+
+
+def test_an_appearance_while_eating_is_not_a_box_visit() -> None:
+    """The bowls are beside the box, so the way to dinner crosses the region."""
+    visits = [appearance(0), appearance(5), appearance(100), appearance(105)]
+
+    events = region_events(visits, busy_spans=[(BASE_TS + 90, BASE_TS + 200)])
+    assert len(events) == 1
+    assert events[0]["start"] != events[0]["end"]  # the pre-meal pair only
+    assert events[0]["minutes"] == pytest.approx(0.1)
+
+
+def test_a_meal_in_the_middle_does_not_stretch_the_visit() -> None:
+    """The measured bug: a pre-dinner walk-through timed a real 03:51 visit.
+
+    Merging the two appearances produced a single 7.6 minute "brief" event instead
+    of a confirmed visit, because the cluster spanned the meal.
+    """
+    visits = [appearance(0), appearance(5), appearance(400), appearance(405)]
+    busy_spans = [(BASE_TS + 10, BASE_TS + 100)]
+
+    events = region_events(visits, busy_spans=busy_spans)
+    assert len(events) == 2
+    # The first pair ends before the meal, the second pair is 400s of one cat
+    # parked at the box, which is the visit the smart box reported.
+    assert events[1]["minutes"] == pytest.approx(0.1)
+
+
+def test_a_brief_sighting_cannot_be_told_from_a_pass_by() -> None:
+    """A documented limitation, not a bug to fix later.
+
+    The measured day contains two five-second pairs of appearances at the box: one
+    was a real visit, the other a cat walking past. They are identical in every
+    feature available here, which is why the verdict carries `certainty` instead of
+    pretending to a precision the camera does not have.
+    """
+    real_visit = [appearance(0, x=0.497, y=0.915), appearance(5, x=0.656, y=0.997)]
+    pass_by = [appearance(0, x=0.470, y=0.955), appearance(5, x=0.559, y=1.000)]
+
+    assert region_events(real_visit) == region_events(pass_by)
+    assert region_events(real_visit)[0]["certainty"] == "brief"
+
+
+def test_build_summary_finds_a_visit_that_never_became_a_zone(tmp_path: Path) -> None:
+    """The regression: the measured uses existed only as `floor` observations.
+
+    Replaying 2026-09-21 - kurumi at 06:14:58 was recorded with zone `floor` (the
+    detection box's bottom edge landed on the floor in front of the box) and one
+    sample cannot open a visit anyway, so `visits` held nothing at all.
+    """
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    for offset, x, y in ((600, 0.656, 1.000), (605, 0.497, 0.915)):
+        store.record_observation(start_ts + offset, "kurumi", "feeder", "floor", 0.8, x, y)
+    # What the tracker did know: the cat was standing on the floor. The visit is
+    # real, it is just filed under the wrong location.
+    floor = store.open_visit(start_ts + 600, "kurumi", "feeder", "floor", 0.8)
+    store.touch_visit(floor, start_ts + 605, 2, 0.8)
+    store.close()
+
+    kurumi = build_summary(day, database)["cats"][0]
+    assert [event["kind"] for event in kurumi["events"]] == ["toilet_use"]
+    assert kurumi["events"][0]["certainty"] == "brief"
+    # The floor row stays: the classifier's answer is not rewritten, the verdict is
+    # added next to it.
+    assert kurumi["locations"] == [{"location": "floor", "minutes": 0.1}]
