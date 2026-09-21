@@ -14,15 +14,15 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SOURCE="$PROJECT_ROOT/deploy/systemd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNITS=(cat-tracker.service cat-report.service cat-report.timer)
+UNITS=(cat-tracker.service cat-report.service cat-report.timer cat-discord.service)
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    systemctl --user disable --now cat-tracker.service cat-report.timer || true
+    systemctl --user disable --now cat-tracker.service cat-report.timer cat-discord.service || true
     for unit in "${UNITS[@]}"; do
         rm -f "$UNIT_DIR/$unit"
     done
     systemctl --user daemon-reload
-    echo "Removed the cat tracker service and the report timer."
+    echo "Removed the cat tracker service, the report timer and the Discord bot."
     exit 0
 fi
 
@@ -55,9 +55,18 @@ else
     tracker_state="enabled, NOT started"
 fi
 
+# Same reasoning for the bot: without a token it would only burn its restart budget.
+if "$PROJECT_ROOT/scripts/run_discord_bot.sh" --check-only >/dev/null 2>&1; then
+    systemctl --user enable --now cat-discord.service
+    bot_state="started"
+else
+    systemctl --user enable cat-discord.service
+    bot_state="enabled, NOT started"
+fi
+
 cat <<EOF
 
-Installed. The tracker is $tracker_state.
+Installed. The tracker is $tracker_state. The bot is $bot_state.
 
 Useful commands:
 
@@ -66,6 +75,8 @@ Useful commands:
     systemctl --user list-timers cat-report.timer   # when the next report runs
     journalctl --user -u cat-report -n 50           # what the last report did
     systemctl --user start cat-report.service       # send one now, to test
+    systemctl --user status cat-discord.service     # is the bot connected
+    journalctl --user -u cat-discord -f             # live bot log
 
 The tracker is only restarted 10 times per 5 minutes. If startup is broken it
 gives up in a failed state; after fixing the cause, reset it with:
@@ -82,4 +93,13 @@ if [[ "$tracker_state" != "started" ]]; then
     echo
     echo "    ./scripts/run_tracker.sh"
     echo "    systemctl --user start cat-tracker.service"
+fi
+
+if [[ "$bot_state" != "started" ]]; then
+    echo
+    echo "The bot did not start because its preflight failed (usually a missing"
+    echo "DISCORD_BOT_TOKEN in .env). Run it to see why, then start the service:"
+    echo
+    echo "    ./scripts/run_discord_bot.sh --check-only"
+    echo "    systemctl --user start cat-discord.service"
 fi

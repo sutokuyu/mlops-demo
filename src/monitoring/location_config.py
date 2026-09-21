@@ -31,6 +31,9 @@ CALIBRATION_CONFIG = LOCATION_CONFIG.get("calibration", {})
 REPORT_CONFIG = LOCATION_CONFIG.get("report", {})
 ALERT_CONFIG = LOCATION_CONFIG.get("alerts", {}).get("discord", {})
 PREVIEW_CONFIG = LOCATION_CONFIG.get("preview", {})
+# The inbound side of Discord (a bot reading messages). The webhook under
+# report.discord is the outbound side and cannot read anything back.
+DISCORD_BOT_CONFIG = LOCATION_CONFIG.get("discord_bot", {})
 
 IDENTITY_CLASSES = {index: name for index, name in enumerate(CONFIG["cats"]["identity_classes"])}
 DEFAULT_IDENTITY_MODEL = resolve_config_path(CONFIG["models"]["identity_detection_model_path"])
