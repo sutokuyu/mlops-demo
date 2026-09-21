@@ -29,17 +29,26 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config_loader import load_config
 from src.monitoring.alignment import AlignmentTracker, transform_point
-from src.monitoring.detections import bottom_center, boxes_from_result, select_best_per_class
+from src.monitoring.detections import (
+    ANCHOR_STRATEGIES,
+    BOTTOM_CENTER,
+    DEFAULT_GRID,
+    anchor_points,
+    bottom_center,
+    boxes_from_result,
+    select_best_per_class,
+)
 from src.monitoring.location_config import (
     ALIGNMENT_CONFIG,
     DEFAULT_IDENTITY_MODEL,
     IDENTITY_CLASSES,
     PREVIEW_CONFIG,
+    TRACKING_CONFIG,
     alignment_settings,
     camera_rtsp_url,
     configured_cameras,
 )
-from src.monitoring.location_zones import Calibration, find_zone, load_calibrations
+from src.monitoring.location_zones import Calibration, load_calibrations, vote_zone
 from src.monitoring.recalibration import reference_features_for
 from src.monitoring.web_preview import FrameHub, PreviewContext, start_server
 
@@ -163,14 +172,16 @@ class Location:
     quality: str = "unknown"
     norm_x: float = 0.0
     norm_y: float = 0.0
+    # How lopsided the zone vote was, e.g. "9/9". Empty when no vote ran.
+    share: str = ""
 
 
 class ZoneLocator:
     """Resolve detection boxes to zone names, compensating for camera drift.
 
     Mirrors location_tracker so the printed location matches what the recorder
-    stores: the anchor is the box bottom-centre (where the cat stands) and it is
-    transformed back into the reference frame before the zone lookup.
+    stores: the same anchor strategy picks the candidate points and the same vote
+    turns them into a zone, after being transformed back into the reference frame.
     """
 
     def __init__(
@@ -178,9 +189,15 @@ class ZoneLocator:
         camera: str,
         calibration: Calibration | None = None,
         settings: dict | None = None,
+        strategy: str | None = None,
+        grid: int | None = None,
     ) -> None:
         settings = settings or alignment_settings()
         self.camera = camera
+        self.strategy = strategy or TRACKING_CONFIG.get("anchor_strategy", BOTTOM_CENTER)
+        self.grid = int(grid or TRACKING_CONFIG.get("anchor_grid", DEFAULT_GRID))
+        if self.strategy not in ANCHOR_STRATEGIES:
+            raise ValueError(f"unknown anchor strategy: {self.strategy}")
         self.calibration = (
             calibration or load_calibrations().get(camera) or Calibration(camera=camera)
         )
@@ -213,21 +230,29 @@ class ZoneLocator:
         anchor_x, anchor_y = bottom_center(box)
         norm_x, norm_y = anchor_x / width, anchor_y / height
         quality = state.quality if state is not None else "no-reference"
+        candidates = [
+            (x / width, y / height) for x, y in anchor_points(box, self.strategy, self.grid)
+        ]
         if state is not None:
             if not state.zone_lookup_allowed:
                 # Alignment is too far off to trust; naming a zone here would be a lie.
                 return Location(None, quality, norm_x, norm_y)
             if state.matrix is not None:
                 norm_x, norm_y = transform_point(state.matrix, (norm_x, norm_y))
-        found = find_zone(self.calibration.zones, norm_x, norm_y)
-        return Location(found.name if found else None, quality, norm_x, norm_y)
+                candidates = [transform_point(state.matrix, point) for point in candidates]
+        # A missing reference frame is not the same as an untrustworthy one: the
+        # zones are used as captured, which is what an uncalibrated camera gets.
+        vote = vote_zone(self.calibration.zones, candidates)
+        return Location(vote.zone, quality, norm_x, norm_y, vote.share)
 
 
 def format_location(camera: str, cat: str, location: Location, confidence: float) -> str:
+    votes = f" vote={location.share}" if location.share else ""
     return (
         f"[{camera}] {cat} -> {location.zone or 'unknown'}"
         f"  conf={confidence:.2f}"
         f" anchor=({location.norm_x:.3f}, {location.norm_y:.3f})"
+        f"{votes}"
         f" align={location.quality}"
     )
 

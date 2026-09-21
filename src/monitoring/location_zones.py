@@ -8,6 +8,7 @@ records interpretable.
 """
 
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -145,3 +146,35 @@ def load_zones(path: Path = ZONES_PATH) -> dict[str, list[Zone]]:
         camera_name: calibration.zones
         for camera_name, calibration in load_calibrations(path).items()
     }
+
+
+@dataclass
+class ZoneVote:
+    """Which zone a set of candidate anchors agreed on, and by how much."""
+
+    zone: str | None
+    matches: int
+    samples: int
+
+    @property
+    def share(self) -> str:
+        """``"7/9"``-style summary, stored alongside the observation."""
+        return f"{self.matches}/{self.samples}" if self.samples else "0/0"
+
+
+def vote_zone(zones: list[Zone], points: list[tuple[float, float]]) -> ZoneVote:
+    """Resolve several candidate anchors to the zone most of them landed in.
+
+    Points outside every polygon simply do not vote, so a box that only clips a
+    zone can still resolve to a low-scoring winner. The score is kept rather than
+    discarded: a 9/9 and a 5/9 mean different things, and this codebase would
+    rather record that than lose the row.
+
+    Ties go to whichever name was seen first, which makes the result a pure
+    function of the point order instead of dict iteration luck.
+    """
+    names = [zone.name for zone in (find_zone(zones, x, y) for x, y in points) if zone]
+    if not names:
+        return ZoneVote(None, 0, len(points))
+    name, count = Counter(names).most_common(1)[0]
+    return ZoneVote(name, count, len(points))

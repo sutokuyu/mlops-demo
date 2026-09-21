@@ -22,7 +22,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.monitoring.alignment import GOOD, AlignmentTracker, transform_point
-from src.monitoring.detections import bottom_center, boxes_from_result, select_best_per_class
+from src.monitoring.detections import (
+    ANCHOR_STRATEGIES,
+    BOTTOM_CENTER,
+    DEFAULT_GRID,
+    anchor_points,
+    bottom_center,
+    boxes_from_result,
+    select_best_per_class,
+)
 from src.monitoring.location_config import (
     ALIGNMENT_CONFIG,
     DEFAULT_IDENTITY_MODEL,
@@ -35,7 +43,12 @@ from src.monitoring.location_config import (
     location_database,
 )
 from src.monitoring.location_store import LocationStore
-from src.monitoring.location_zones import Calibration, find_zone, load_calibrations
+from src.monitoring.location_zones import (
+    Calibration,
+    ZoneVote,
+    load_calibrations,
+    vote_zone,
+)
 from src.monitoring.recalibration import reanchor, reference_features_for
 from src.monitoring.rtsp_stream import StreamReader
 
@@ -52,6 +65,11 @@ class Observation:
     norm_y: float | None = None
     calibration_id: str | None = None
     alignment_quality: str | None = None
+    # Normalized detection box, kept so a future anchor strategy can be applied to
+    # this history instead of only to new samples.
+    box: tuple[float, float, float, float] | None = None
+    # (points that agreed, points sampled) - 9/9 is confident, 5/9 is not.
+    vote: tuple[int, int] | None = None
 
 
 @dataclass
@@ -144,25 +162,44 @@ def sample_cameras(trackers: list[CameraTracker], model, args) -> list[Observati
         boxes = select_best_per_class(
             boxes_from_result(result, EXPECTED_CLASSES), args.conf, args.cross_class_iou
         )
+        strategy = getattr(args, "anchor_strategy", None) or TRACKING_CONFIG.get(
+            "anchor_strategy", BOTTOM_CENTER
+        )
+        grid = int(
+            getattr(args, "anchor_grid", None) or TRACKING_CONFIG.get("anchor_grid", DEFAULT_GRID)
+        )
         for class_id, confidence, box in boxes:
+            # norm_x/norm_y keep their historical meaning - the transformed
+            # bottom-centre anchor - so old and new rows stay comparable.
             anchor_x, anchor_y = bottom_center(box)
+            normal_box = (
+                box[0] / image_width,
+                box[1] / image_height,
+                box[2] / image_width,
+                box[3] / image_height,
+            )
             norm_x, norm_y = anchor_x / image_width, anchor_y / image_height
-            zone = None
+            candidates = [
+                (x / image_width, y / image_height) for x, y in anchor_points(box, strategy, grid)
+            ]
+            vote = ZoneVote(None, 0, len(candidates))
             if state is None or state.zone_lookup_allowed:
                 if state is not None and state.matrix is not None:
                     norm_x, norm_y = transform_point(state.matrix, (norm_x, norm_y))
-                found = find_zone(tracker.calibration.zones, norm_x, norm_y)
-                zone = found.name if found else None
+                    candidates = [transform_point(state.matrix, point) for point in candidates]
+                vote = vote_zone(tracker.calibration.zones, candidates)
             observations.append(
                 Observation(
                     cat=EXPECTED_CLASSES[class_id],
                     camera=tracker.name,
-                    zone=zone,
+                    zone=vote.zone,
                     confidence=confidence,
                     norm_x=norm_x,
                     norm_y=norm_y,
                     calibration_id=tracker.calibration.calibration_id or None,
                     alignment_quality=state.quality if state is not None else None,
+                    box=normal_box,
+                    vote=(vote.matches, vote.samples),
                 )
             )
     return observations
@@ -215,6 +252,8 @@ def apply_observations(
             observation.norm_y,
             observation.calibration_id,
             observation.alignment_quality,
+            observation.box,
+            observation.vote,
         )
         key = (observation.camera, observation.zone)
 
@@ -306,6 +345,18 @@ def parse_args(argv=None):
         help="Drop the weaker box when bagel and kurumi boxes overlap this much.",
     )
     parser.add_argument("--database", type=Path, default=None)
+    parser.add_argument(
+        "--anchor-strategy",
+        choices=ANCHOR_STRATEGIES,
+        default=TRACKING_CONFIG.get("anchor_strategy", BOTTOM_CENTER),
+        help="How a detection box becomes the point(s) zone lookup matches against.",
+    )
+    parser.add_argument(
+        "--anchor-grid",
+        type=int,
+        default=int(TRACKING_CONFIG.get("anchor_grid", DEFAULT_GRID)),
+        help="Grid size per side for --anchor-strategy lower_grid.",
+    )
     parser.add_argument(
         "--camera",
         action="append",

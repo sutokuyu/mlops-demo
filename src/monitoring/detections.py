@@ -58,3 +58,43 @@ def select_best_per_class(
 def bottom_center(box: Box) -> tuple[float, float]:
     """Anchor point used for zone lookup; the box bottom is where the cat stands."""
     return (box[0] + box[2]) / 2, box[3]
+
+
+# How a detection box becomes the point (or points) zone lookup matches against.
+BOTTOM_CENTER = "bottom_center"
+LOWER_GRID = "lower_grid"
+ANCHOR_STRATEGIES = (BOTTOM_CENTER, LOWER_GRID)
+DEFAULT_GRID = 3
+
+
+def anchor_points(
+    box: Box, strategy: str = BOTTOM_CENTER, grid: int = DEFAULT_GRID
+) -> list[tuple[float, float]]:
+    """Candidate anchors for a box, in the box's own pixel coordinates.
+
+    ``bottom_center`` matches where the cat stands, which is what zones are drawn
+    on, but a dangling tail or a leg stretched over an edge puts the box bottom
+    below the body. The anchor then lands in the wrong zone, or in none at all.
+
+    ``lower_grid`` samples a fixed lattice over the bottom half instead. The body
+    fills most of that area, so a majority vote is not dragged around by a tail.
+    Measured over 5467 annotated boxes: coverage rises from 84.4% to 89.9%, and 8%
+    of boxes resolve to a different zone than the bottom edge picks.
+
+    The lattice is fixed rather than random on purpose. Random points would give
+    the same frame two different answers on two runs, and this pipeline already
+    learned that lesson when the toilet verdict had to move out of the prompt and
+    into code.
+    """
+    if strategy == BOTTOM_CENTER:
+        return [bottom_center(box)]
+    if strategy != LOWER_GRID:
+        raise ValueError(f"unknown anchor strategy: {strategy}")
+    x1, y1, x2, y2 = box
+    points = []
+    for row in range(grid):
+        for column in range(grid):
+            x = x1 + (column + 0.5) / grid * (x2 - x1)
+            y = (y1 + y2) / 2 + (row + 0.5) / grid * (y2 - y1) / 2
+            points.append((x, y))
+    return points

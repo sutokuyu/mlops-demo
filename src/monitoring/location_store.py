@@ -3,6 +3,11 @@
 Observations keep the cat's anchor point in reference-frame coordinates, so the
 history can be re-interpreted after re-drawing zones or re-anchoring a camera
 without re-running detection.
+
+They also keep the detection box and how lopsided the zone vote was. The anchor
+point alone is not enough to re-derive a location under a different anchor
+strategy, which is exactly the situation the first zone backfill ran into: the
+stored point was all there was to go on.
 """
 
 import sqlite3
@@ -20,7 +25,13 @@ CREATE TABLE IF NOT EXISTS observations (
     norm_x REAL,
     norm_y REAL,
     calibration_id TEXT,
-    alignment_quality TEXT
+    alignment_quality TEXT,
+    box_x1 REAL,
+    box_y1 REAL,
+    box_x2 REAL,
+    box_y2 REAL,
+    zone_matches INTEGER,
+    zone_samples INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations (ts);
 
@@ -44,6 +55,15 @@ MIGRATIONS = {
         "norm_y": "ALTER TABLE observations ADD COLUMN norm_y REAL",
         "calibration_id": "ALTER TABLE observations ADD COLUMN calibration_id TEXT",
         "alignment_quality": "ALTER TABLE observations ADD COLUMN alignment_quality TEXT",
+        # Normalized detection box, so any anchor strategy can be re-applied to
+        # history without re-running detection.
+        "box_x1": "ALTER TABLE observations ADD COLUMN box_x1 REAL",
+        "box_y1": "ALTER TABLE observations ADD COLUMN box_y1 REAL",
+        "box_x2": "ALTER TABLE observations ADD COLUMN box_x2 REAL",
+        "box_y2": "ALTER TABLE observations ADD COLUMN box_y2 REAL",
+        # How lopsided the zone vote was: 9/9 is confident, 5/9 is not.
+        "zone_matches": "ALTER TABLE observations ADD COLUMN zone_matches INTEGER",
+        "zone_samples": "ALTER TABLE observations ADD COLUMN zone_samples INTEGER",
     },
     "visits": {
         "calibration_id": "ALTER TABLE visits ADD COLUMN calibration_id TEXT",
@@ -79,6 +99,21 @@ class ObservationRow:
     norm_y: float | None
     calibration_id: str | None
     alignment_quality: str | None
+    box_x1: float | None = None
+    box_y1: float | None = None
+    box_x2: float | None = None
+    box_y2: float | None = None
+    zone_matches: int | None = None
+    zone_samples: int | None = None
+
+    @property
+    def box(self) -> tuple[float, float, float, float] | None:
+        """The detection box in normalized frame coordinates, if it was recorded."""
+        if self.box_x1 is None or self.box_y1 is None:
+            return None
+        if self.box_x2 is None or self.box_y2 is None:
+            return None
+        return (self.box_x1, self.box_y1, self.box_x2, self.box_y2)
 
 
 class LocationStore:
@@ -110,12 +145,34 @@ class LocationStore:
         norm_y: float | None = None,
         calibration_id: str | None = None,
         alignment_quality: str | None = None,
+        box: tuple[float, float, float, float] | None = None,
+        vote: tuple[int, int] | None = None,
     ) -> None:
+        """box`` and ``vote`` are normalized box coords and (matches, samples)."""
+        box_x1, box_y1, box_x2, box_y2 = box if box is not None else (None, None, None, None)
+        zone_matches, zone_samples = vote if vote is not None else (None, None)
         self._connection.execute(
             "INSERT INTO observations"
-            " (ts, cat, camera, zone, confidence, norm_x, norm_y, calibration_id, alignment_quality)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (ts, cat, camera, zone, confidence, norm_x, norm_y, calibration_id, alignment_quality),
+            " (ts, cat, camera, zone, confidence, norm_x, norm_y, calibration_id,"
+            "  alignment_quality, box_x1, box_y1, box_x2, box_y2, zone_matches, zone_samples)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ts,
+                cat,
+                camera,
+                zone,
+                confidence,
+                norm_x,
+                norm_y,
+                calibration_id,
+                alignment_quality,
+                box_x1,
+                box_y1,
+                box_x2,
+                box_y2,
+                zone_matches,
+                zone_samples,
+            ),
         )
         self._connection.commit()
 

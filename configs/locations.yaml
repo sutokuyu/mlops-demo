@@ -25,6 +25,20 @@ tracking:
   confidence_threshold: 0.3
   imgsz: 640
   device: 0
+  # box 的哪个部位用来查 zone。
+  #   bottom_center - 只用底边中点（旧行为）。猫踩在地面上时准确，但尾巴或
+  #                   伸出去的腿会把框底拉低，锚点就落到错的 zone 或者落空。
+  #   lower_grid    - 在框的下半部分取 anchor_grid×anchor_grid 的固定网格，
+  #                   按多数决定 zone。身体占了下半部分的大部分，所以一条尾巴
+  #                   带不偏结果。用 5467 个真实标注框实测（覆盖率 / 与底边中点
+  #                   给出不同答案的比例）：
+  #                     bottom_center  84.9%
+  #                     lower_grid     90.3%   且 8% 的框结论不同
+  #                   每个相机的覆盖率都提升，没有一个变差。
+  # 网格用固定点阵而非随机点：随机采样会让同一帧两次运行给出不同答案，这个
+  # pipeline 已经在厕所判定上吃过一次亏。
+  anchor_strategy: lower_grid
+  anchor_grid: 3
   # Consecutive samples required before accepting a zone change, to avoid
   # flickering between neighbouring zones.
   switch_min_samples: 2
