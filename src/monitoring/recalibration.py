@@ -31,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.monitoring.alignment import (
+    USE_FRAME,
     ReferenceFeatures,
     build_reference_features,
     describe_transform,
@@ -126,10 +127,15 @@ def _relative(path: Path) -> str:
         return str(path)
 
 
-def _notify(settings: dict, camera: str, content: str, attachment: Path | None) -> str:
+def _notify(settings: dict, camera: str, content: str, attachment: Path | None) -> tuple[bool, str]:
+    """Send a Discord message and report whether it actually went out.
+
+    The caller uses the flag to decide whether the attachment is still needed: once
+    Discord holds the image, a local copy is duplicated storage that piles up.
+    """
     webhook_url = settings.get("discord_webhook") or ""
     if not webhook_url or settings.get("notify") is False:
-        return "notification skipped (no webhook configured)"
+        return False, "notification skipped (no webhook configured)"
     try:
         post_discord_message(
             {"content": content, "username": settings.get("discord_username") or camera},
@@ -137,8 +143,8 @@ def _notify(settings: dict, camera: str, content: str, attachment: Path | None) 
             webhook_url=webhook_url,
         )
     except (OSError, RuntimeError, ValueError) as error:
-        return f"notification failed: {error}"
-    return "overlay sent to Discord"
+        return False, f"notification failed: {error}"
+    return True, "overlay sent to Discord"
 
 
 def reanchor(
@@ -146,8 +152,16 @@ def reanchor(
     frame: np.ndarray,
     settings: dict,
     now: datetime | None = None,
+    notify_on_failure: bool = True,
 ) -> ReanchorOutcome:
-    """Project the existing zones onto the current frame and store a new calibration."""
+    """Project the existing zones onto the current frame and store a new calibration.
+
+    ``notify_on_failure=False`` skips the Discord message and the failure overlay
+    for a failure. The tracker uses it to report only the first failure of a streak:
+    retrying every cooldown is still worth it because the lighting may swing back,
+    but repeating the same warning every ten minutes is not. A success always
+    notifies, whatever this is set to, which is what re-arms the alert.
+    """
     now = now or datetime.now()
     calibration_dir = Path(settings["calibration_dir"])
     camera_dir = calibration_dir / calibration.camera
@@ -185,21 +199,44 @@ def reanchor(
             max_residual=settings.get("max_residual", 0.01),
         )
         if not result.usable:
+            if not notify_on_failure:
+                return ReanchorOutcome(
+                    False,
+                    None,
+                    f"automatic re-anchor failed: {result.reason}; "
+                    "notification suppressed (already reported for this camera)",
+                )
+            # What the failure means depends on the configured fallback.
+            if settings.get("on_alignment_failure") == USE_FRAME:
+                advice = (
+                    "Zones are still resolved from the frame as captured and those samples "
+                    "are recorded with `alignment_quality=failed`. Re-save the zones in the "
+                    "editor to adopt the current lighting as the reference."
+                )
+            else:
+                advice = (
+                    "The previous zones are kept and locations fall back to the camera name. "
+                    "Please run the zone editor to redraw them."
+                )
             overlay = render_overlay(
                 frame,
                 [],
                 f"{calibration.camera}: automatic re-anchor failed",
-                f"{result.reason} - please redraw the zones manually",
+                result.reason,
             )
             overlay_path = camera_dir / f"reanchor_failed_{calibration_id}.jpg"
             cv2.imwrite(str(overlay_path), overlay)
             content = (
                 f"⚠️ Camera `{calibration.camera}` could not be re-anchored automatically.\n"
                 f"Reason: {result.reason}\n"
-                "The previous zones are kept and locations fall back to the camera name. "
-                "Please run the zone editor to redraw them."
+                f"{advice}"
             )
-            note = _notify(settings, calibration.camera, content, overlay_path)
+            delivered, note = _notify(settings, calibration.camera, content, overlay_path)
+            if delivered:
+                # Discord already holds the image, so the local copy is duplicated
+                # storage that otherwise grows by one file per failed attempt.
+                overlay_path.unlink(missing_ok=True)
+                overlay_path = None
             return ReanchorOutcome(
                 False, None, f"automatic re-anchor failed: {result.reason}; {note}", overlay_path
             )
@@ -247,7 +284,7 @@ def reanchor(
     if off_frame:
         lines.append(f"⚠️ These zones are off-frame now: {', '.join(off_frame)}")
     lines.append("Check the overlay image; redraw the zones if the alignment looks wrong.")
-    note = _notify(settings, calibration.camera, "\n".join(lines), overlay_path)
+    _, note = _notify(settings, calibration.camera, "\n".join(lines), overlay_path)
 
     return ReanchorOutcome(
         True, updated, f"{mode}; {note}", overlay_path, transform_note, off_frame

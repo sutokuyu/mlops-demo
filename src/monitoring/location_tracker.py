@@ -97,6 +97,9 @@ class CameraTracker:
     last_sampled_at: float = 0.0
     degraded_streak: int = 0
     last_reanchor_at: float = 0.0
+    # Set after a failed re-anchor so the same failure is reported only once. A
+    # successful re-anchor clears it and re-arms the alert.
+    reanchor_failure_reported: bool = False
 
     @property
     def zones(self):
@@ -118,6 +121,7 @@ def build_trackers() -> list[CameraTracker]:
                 good_inlier_ratio=settings["good_inlier_ratio"],
                 max_residual=settings["max_residual"],
                 trust_last_good_seconds=ALIGNMENT_CONFIG.get("trust_last_good_seconds", 60.0),
+                on_failure=settings["on_alignment_failure"],
             )
             alignment.set_reference(reference_features_for(calibration, settings["work_width"]))
         if not calibration.zones:
@@ -390,13 +394,21 @@ def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
         print(f"[{tracker.name}] re-anchor skipped: no fresh frame")
         return
 
-    outcome = reanchor(tracker.calibration, frame, settings)
+    outcome = reanchor(
+        tracker.calibration,
+        frame,
+        settings,
+        notify_on_failure=not tracker.reanchor_failure_reported,
+    )
     print(f"[{tracker.name}] re-anchor: {outcome.message}")
     if outcome.ok and outcome.calibration is not None:
+        tracker.reanchor_failure_reported = False
         tracker.calibration = outcome.calibration
         tracker.alignment.set_reference(
             reference_features_for(outcome.calibration, settings["work_width"])
         )
+    else:
+        tracker.reanchor_failure_reported = True
 
 
 def run(args) -> None:

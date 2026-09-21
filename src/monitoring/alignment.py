@@ -22,6 +22,12 @@ GOOD = "good"
 DEGRADED = "degraded"
 FAILED = "failed"
 
+# What to do when matching fails outright, i.e. past the trust-last-good window.
+# ``USE_FRAME`` resolves zones from the frame as captured, ``SKIP`` leaves the zone
+# unknown. See ``AlignmentTracker.on_failure``.
+USE_FRAME = "use_frame"
+SKIP = "skip"
+
 RATIO_TEST = 0.75
 RANSAC_REPROJECTION_THRESHOLD = 0.004
 DEFAULT_WORK_WIDTH = 640
@@ -216,7 +222,18 @@ def describe_transform(matrix: np.ndarray) -> str:
 
 @dataclass
 class AlignmentTracker:
-    """Per-camera alignment with a fallback window for temporarily bad matches."""
+    """Per-camera alignment with a fallback window for temporarily bad matches.
+
+    ``on_failure`` decides what a hard failure means for the zone lookup. The
+    default (``USE_FRAME``) resolves zones from the frame as captured, on the
+    assumption that a fixed camera plus a lighting change is far more likely than
+    a camera that moved and stopped matching. It is not free: a genuinely moved
+    camera then yields wrong zones instead of missing ones. Those samples are
+    still marked ``alignment_quality == FAILED`` in the database, so they can be
+    filtered out afterwards - which is exactly why recording the quality matters
+    more than discarding the row. ``SKIP`` keeps the older, stricter behaviour of
+    leaving the zone unknown.
+    """
 
     camera: str
     reference: ReferenceFeatures | None = None
@@ -225,6 +242,7 @@ class AlignmentTracker:
     good_inlier_ratio: float = 0.5
     max_residual: float = 0.01
     trust_last_good_seconds: float = 60.0
+    on_failure: str = USE_FRAME
     last_good_matrix: np.ndarray | None = None
     last_good_at: float = 0.0
     consecutive_failures: int = 0
@@ -268,7 +286,10 @@ class AlignmentTracker:
                 return AlignmentState(self.last_good_matrix, DEGRADED, self.note, True)
             self.quality = FAILED
             self.note = result.reason
-            return AlignmentState(None, FAILED, self.note, False)
+            # No matrix: the caller uses the anchor point as captured, which is
+            # the same path an uncalibrated camera takes. Applying the stale
+            # last_good_matrix here would stack one unverified guess on another.
+            return AlignmentState(None, FAILED, self.note, self.on_failure == USE_FRAME)
 
         self.consecutive_failures = 0
         self.quality = result.quality

@@ -61,6 +61,14 @@ alignment:
   # Keep using the last good transform this long when matching temporarily fails
   # (night IR frames, a cat filling the frame, brief motion blur).
   trust_last_good_seconds: 60.0
+  # 匹配彻底失败（超出上面的窗口）时怎么处理 zone。ORB 描述子只对旋转不变，
+  # 对光照不变性很差：百叶窗开合、白天/夜间灯光一变，匹配对数量会从上百年塌到个位数，
+  # 相机其实一动没动。这时：
+  #   use_frame - 按原样用当前帧查 zone。相机固定 + 光照变化远比"相机真的移了"常见，
+  #               所以默认取这个。代价是相机真被碰歪时会给出错的位置而不是空值。
+  #               这些样本的 alignment_quality 仍记为 failed，事后可以筛掉。
+  #   skip      - 保持旧行为，宁可 zone 为空。
+  on_alignment_failure: use_frame
   # Re-anchor once alignment has been unreliable for this long.
   reanchor_after_failures: 6
   reanchor_after_degraded_samples: 12

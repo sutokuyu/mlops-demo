@@ -19,6 +19,8 @@ from src.monitoring.alignment import (
     DEGRADED,
     FAILED,
     GOOD,
+    SKIP,
+    USE_FRAME,
     AlignmentResult,
     AlignmentTracker,
     build_reference_features,
@@ -127,11 +129,54 @@ def test_alignment_tracker_reuses_the_last_good_transform(monkeypatch) -> None:
     assert state.zone_lookup_allowed
     assert "reusing the last good alignment" in state.note
 
-    # Past the trust window the camera is treated as uncalibrated.
+    # Past the trust window the sample is marked failed. The default is still to
+    # resolve zones from the frame as captured, because the alternative - a fixed
+    # camera plus a lighting change - is far more common than real camera drift.
     state = tracker.resolve(frame, now + 120)
+    assert state.quality == FAILED
+    assert state.zone_lookup_allowed
+    assert state.matrix is None
+
+
+def test_alignment_tracker_can_skip_zones_on_failure(monkeypatch) -> None:
+    """``skip`` keeps the stricter behaviour: no zone rather than a guessed one."""
+    frame = make_texture()
+    tracker = AlignmentTracker(camera="living_room", trust_last_good_seconds=0.0, on_failure=SKIP)
+    tracker.set_reference(build_reference_features(frame))
+    assert tracker.on_failure == SKIP
+
+    monkeypatch.setattr(
+        alignment_module,
+        "estimate_alignment",
+        lambda *args, **kwargs: AlignmentResult(FAILED, None, 0, 0, 0.0, "no matches"),
+    )
+
+    state = tracker.resolve(frame, 1000.0)
     assert state.quality == FAILED
     assert not state.zone_lookup_allowed
     assert state.matrix is None
+    assert tracker.consecutive_failures == 1
+
+
+def test_failed_alignment_still_counts_towards_a_reanchor(monkeypatch) -> None:
+    """Resolving zones anyway must not hide drift from the re-anchor trigger.
+
+    If failures stopped incrementing the counter, a camera that really moved
+    would keep producing wrong zones forever instead of alerting.
+    """
+    tracker = AlignmentTracker(camera="sofa", trust_last_good_seconds=0.0, on_failure=USE_FRAME)
+    tracker.set_reference(build_reference_features(make_texture()))
+    monkeypatch.setattr(
+        alignment_module,
+        "estimate_alignment",
+        lambda *args, **kwargs: AlignmentResult(FAILED, None, 0, 0, 0.0, "no matches"),
+    )
+
+    for step in range(6):
+        state = tracker.resolve(make_texture(), 100.0 + step)
+        assert state.zone_lookup_allowed, "zones must keep resolving"
+
+    assert tracker.consecutive_failures == 6
 
 
 def test_alignment_tracker_without_reference_uses_zones_as_captured() -> None:
@@ -203,6 +248,81 @@ def test_reanchor_projects_zones_and_writes_a_new_calibration(reanchor_settings)
     assert stored.calibration_id.startswith("living_room-20260920T120000")
     assert stored.reference_frame
     assert outcome.calibration.reference_path.is_file()
+
+
+def test_reanchor_can_suppress_a_repeated_failure_notification(
+    reanchor_settings, monkeypatch
+) -> None:
+    """Only the first failure of a streak is worth a Discord message.
+
+    The tracker keeps retrying every cooldown because the lighting may swing back,
+    but repeating the same warning every ten minutes is noise, and each attempt was
+    also writing another overlay file.
+    """
+    zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
+    calibration = calibrated_camera(reanchor_settings, reanchor_settings, zones, make_texture())
+    # A flat frame cannot be matched to the reference, so alignment fails outright.
+    blank = np.full((HEIGHT, WIDTH, 3), 127, np.uint8)
+
+    notified: list[str] = []
+
+    def record(settings, camera, content, attachment):
+        notified.append(camera)
+        return True, "overlay sent to Discord"
+
+    monkeypatch.setattr(recalibration, "_notify", record)
+
+    first = recalibration.reanchor(calibration, blank, reanchor_settings)
+    assert not first.ok
+    assert notified == ["living_room"]
+    assert "failed" in first.message
+
+    second = recalibration.reanchor(calibration, blank, reanchor_settings, notify_on_failure=False)
+    assert not second.ok
+    assert notified == ["living_room"], "a repeated failure must stay quiet"
+    assert "suppressed" in second.message
+    assert second.overlay_path is None, "nothing was written to send, so nothing to clean up"
+
+    leftovers = list(Path(reanchor_settings["calibration_dir"]).rglob("reanchor_failed_*.jpg"))
+    assert leftovers == [], "neither attempt should leave an overlay behind"
+
+
+def test_reanchor_deletes_the_failure_overlay_once_discord_has_it(
+    reanchor_settings, monkeypatch
+) -> None:
+    """The overlay is a delivery vehicle, not an archive.
+
+    It exists so the operator can see what the camera sees now. Discord keeps the
+    image, so a local copy is only duplicated storage.
+    """
+    zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
+    calibration = calibrated_camera(reanchor_settings, reanchor_settings, zones, make_texture())
+    blank = np.full((HEIGHT, WIDTH, 3), 127, np.uint8)
+
+    def record(settings, camera, content, attachment):
+        assert attachment is not None and attachment.is_file(), "upload before deleting"
+        return True, "overlay sent to Discord"
+
+    monkeypatch.setattr(recalibration, "_notify", record)
+
+    outcome = recalibration.reanchor(calibration, blank, reanchor_settings)
+
+    assert not outcome.ok
+    assert outcome.overlay_path is None
+    leftovers = list(Path(reanchor_settings["calibration_dir"]).rglob("reanchor_failed_*.jpg"))
+    assert leftovers == []
+
+
+def test_reanchor_keeps_the_failure_overlay_when_nothing_was_sent(reanchor_settings) -> None:
+    """With no webhook configured the overlay is the only record, so it stays."""
+    zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
+    calibration = calibrated_camera(reanchor_settings, reanchor_settings, zones, make_texture())
+    blank = np.full((HEIGHT, WIDTH, 3), 127, np.uint8)
+
+    outcome = recalibration.reanchor(calibration, blank, reanchor_settings)
+
+    assert not outcome.ok
+    assert outcome.overlay_path is not None and outcome.overlay_path.is_file()
 
 
 def test_reanchor_keeps_previous_zones_when_alignment_fails(reanchor_settings) -> None:

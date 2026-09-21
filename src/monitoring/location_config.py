@@ -61,6 +61,7 @@ def alignment_settings() -> dict:
         "discord_webhook": alert_webhook(),
         "discord_username": ALERT_CONFIG.get("username", "Cat Location Bot"),
         "notify": ALIGNMENT_CONFIG.get("notify_on_reanchor", True),
+        "on_alignment_failure": ALIGNMENT_CONFIG.get("on_alignment_failure", "use_frame"),
     }
 
 

@@ -12,9 +12,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.monitoring import location_report, location_tracker
+from src.monitoring.alignment import AlignmentTracker
 from src.monitoring.detections import bottom_center, select_best_per_class
 from src.monitoring.location_store import LocationStore
-from src.monitoring.location_zones import Zone, find_zone
+from src.monitoring.location_zones import Calibration, Zone, find_zone
+from src.monitoring.recalibration import ReanchorOutcome
 
 ROOM = Zone("living_room", [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
 SOFA = Zone("sofa", [(0.1, 0.6), (0.4, 0.6), (0.4, 0.95), (0.1, 0.95)])
@@ -25,6 +27,65 @@ def test_find_zone_prefers_the_smallest_containing_polygon() -> None:
     assert find_zone([ROOM, SOFA], 0.25, 0.8).name == "sofa"
     assert find_zone([ROOM, SOFA], 0.8, 0.3).name == "living_room"
     assert find_zone([SOFA], 0.9, 0.1) is None
+
+
+class FakeReader:
+    """Enough of StreamReader for maybe_reanchor, which only wants a fresh frame."""
+
+    def __init__(self, frame) -> None:
+        self.frame = frame
+
+    def get_latest_frame(self, *args, **kwargs):
+        return self.frame
+
+
+def test_reanchor_failures_are_reported_once_until_a_success(monkeypatch) -> None:
+    """A camera that cannot be re-anchored must not alert on every retry.
+
+    Retrying is still worth it - the lighting may swing back - so only the first
+    failure of a streak notifies, and a success re-arms the alert.
+    """
+    tracker = location_tracker.CameraTracker(
+        name="sofa",
+        rtsp_url="rtsp://example/stream",
+        calibration=Calibration(camera="sofa", zones=[SOFA], calibration_id="sofa-1"),
+        alignment=AlignmentTracker(camera="sofa", consecutive_failures=6),
+    )
+    tracker.reader = FakeReader(object())
+
+    asked_to_notify_on_failure: list[bool] = []
+
+    def failing_reanchor(calibration, frame, settings, now=None, notify_on_failure=True):
+        asked_to_notify_on_failure.append(notify_on_failure)
+        return ReanchorOutcome(False, None, "automatic re-anchor failed", None)
+
+    monkeypatch.setattr(location_tracker, "reanchor", failing_reanchor)
+    monkeypatch.setattr(location_tracker, "reference_features_for", lambda *args: None)
+    settings = {"work_width": 640}
+
+    tracker.alignment.consecutive_failures = 6
+    location_tracker.maybe_reanchor(tracker, 1000.0, settings)
+    assert asked_to_notify_on_failure == [True], "the first failure is news"
+    assert tracker.reanchor_failure_reported
+
+    tracker.alignment.consecutive_failures = 6
+    location_tracker.maybe_reanchor(tracker, 5000.0, settings)
+    assert asked_to_notify_on_failure == [True, False], "the next retry is not"
+
+    def succeeding_reanchor(calibration, frame, settings, now=None, notify_on_failure=True):
+        asked_to_notify_on_failure.append(notify_on_failure)
+        return ReanchorOutcome(True, calibration, "projected", None)
+
+    monkeypatch.setattr(location_tracker, "reanchor", succeeding_reanchor)
+    tracker.alignment.consecutive_failures = 6
+    location_tracker.maybe_reanchor(tracker, 9000.0, settings)
+    # The success still notifies inside reanchor() - the flag only ever gates
+    # failures - and it re-arms the alert for the next genuine failure.
+    assert not tracker.reanchor_failure_reported, "a success re-arms the alert"
+
+    tracker.alignment.consecutive_failures = 6
+    location_tracker.maybe_reanchor(tracker, 20000.0, settings)
+    assert asked_to_notify_on_failure[-1] is True, "so the next failure is news again"
 
 
 def test_zone_area_is_used_for_specificity() -> None:
