@@ -219,13 +219,24 @@ def best_observation_per_cat(observations: list[Observation]) -> dict[str, Obser
     return best
 
 
+def describe_location(camera: str, zone: str | None) -> str:
+    """``sofa/carpet``, or ``feeder/unknown`` when no zone matched.
+
+    The camera belongs in the string. A cat crossing feeder -> sofa -> living room
+    reports the same zone name (``floor``) three times, so a zone-only label made a
+    real move read as "floor for 35s -> moved to floor", which looks like nothing
+    happened.
+    """
+    return f"{camera}/{zone or 'unknown'}"
+
+
 def close_visit(store: LocationStore, visit: ActiveVisit, end_ts: float, reason: str) -> None:
     if end_ts <= visit.start_ts:
         end_ts = visit.start_ts
     store.touch_visit(visit.visit_id, end_ts, visit.samples, visit.max_confidence)
     duration = end_ts - visit.start_ts
     print(
-        f"[{visit.cat}] {visit.zone or visit.camera} for {duration:.0f}s "
+        f"[{visit.cat}] {describe_location(visit.camera, visit.zone)} for {duration:.0f}s "
         f"({visit.samples} samples) -> {reason}"
     )
 
@@ -280,7 +291,7 @@ def apply_observations(
                 max_confidence=observation.confidence,
                 visit_id=visit_id,
             )
-            print(f"[{cat}] now at {observation.zone or observation.camera}")
+            print(f"[{cat}] now at {describe_location(observation.camera, observation.zone)}")
             continue
 
         if (visit.camera, visit.zone) == key:
@@ -306,7 +317,12 @@ def apply_observations(
             store.touch_visit(visit.visit_id, now, visit.samples, visit.max_confidence)
             continue
 
-        close_visit(store, visit, visit.pending_since_ts, f"moved to {key[1] or key[0]}")
+        close_visit(
+            store,
+            visit,
+            visit.pending_since_ts,
+            f"moved to {describe_location(key[0], key[1])}",
+        )
         visit_id = store.open_visit(
             visit.pending_since_ts,
             cat,
