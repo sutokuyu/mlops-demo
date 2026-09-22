@@ -431,7 +431,9 @@ def test_an_unreadable_day_gets_an_apology_not_a_crash(monkeypatch) -> None:
     monkeypatch.setattr(discord_bot, "build_summary", explode)
     reply = build_reply("报告", settings=settings(), days_ago=0)
 
-    assert DAY.isoformat() in reply
+    # The day asked for, not a fixed date: this asserts the apology names the day it
+    # failed to read, and a hardcoded date stops being "today" the next morning.
+    assert discord_bot.target_day(0).isoformat() in reply
     assert "unable to open database file" in reply
 
 
