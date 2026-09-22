@@ -382,6 +382,44 @@ def test_a_host_a_camera_is_recording_from_is_never_opened() -> None:
     )
 
 
+def test_a_camera_that_was_not_looked_for_is_never_called_missing() -> None:
+    """Otherwise the log lies, and so does the sync script's exit code.
+
+    The tracker searches for one camera at a time and tells the search to leave the
+    addresses its other cameras are recording from alone - which means those are never
+    found either. Reporting them as missing would send the owner looking for a camera
+    that is working.
+    """
+    network = FakeNetwork({"feeder": "192.168.3.59"})
+    result = run(
+        network,
+        {"192.168.3.45": (554,), "192.168.3.59": (554,)},
+        names=["sofa"],
+        skip_hosts=("192.168.3.59",),
+    )
+    assert result.missing == ["sofa"]
+    assert "living_room" not in result.missing
+    assert "feeder" not in result.missing
+
+
+def test_the_picture_still_vetoes_when_only_one_camera_is_looked_for() -> None:
+    """The comparison runs against every reference frame, not only the ones searched.
+
+    That is why the fingerprints are computed for all cameras from the frame already in
+    hand: looking for one camera must not blind the check that says "this is not it".
+    """
+    network = FakeNetwork(
+        {"sofa": "192.168.3.45"},
+        matches={
+            ("192.168.3.45", "living_room", "sofa"): 40,
+            ("192.168.3.45", "sofa", "sofa"): 2,
+        },
+    )
+    result = run(network, {"192.168.3.45": (554,)}, names=["sofa"])
+    assert result.missing == ["sofa"]
+    assert any("matches living_room far better" in note for note in result.notes)
+
+
 # --- reading the settings --------------------------------------------------------
 
 

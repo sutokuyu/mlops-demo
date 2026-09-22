@@ -424,7 +424,7 @@ def test_a_camera_found_elsewhere_is_relocated_without_a_restart(monkeypatch) ->
         camera="feeder",
         host="192.168.3.59",
         url="rtsp://admin:pw@192.168.3.59:554/h264/ch1/main/av_stream",
-        evidence=HostEvidence("192.168.3.59", "feeder", credential_ok=True, matches=79),
+        evidence=HostEvidence("192.168.3.59", "feeder", credential_ok=True, matches={"feeder": 79}),
         previous_host="192.168.3.13",
     )
     monkeypatch.setattr(

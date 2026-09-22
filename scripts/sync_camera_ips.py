@@ -203,10 +203,13 @@ def main(argv=None) -> int:
         print(f"  {line}")
     if args.explain:
         for evidence in result.evidence:
+            other = evidence.best_other()
             print(
                 f"    {evidence.host:<16} as {evidence.camera:<12} "
                 f"password={'ok' if evidence.credential_ok else 'no':<3} "
-                f"matches={evidence.matches:<4} size={evidence.resolution or '-'}"
+                f"matches={evidence.own_matches:<4} "
+                f"next={other[0] + ':' + str(other[1]) if other else '-'} "
+                f"size={evidence.resolution or '-'}"
             )
 
     hosts: dict[str, str] = {}

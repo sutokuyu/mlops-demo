@@ -290,13 +290,32 @@ def fingerprint_matches(frame: np.ndarray, reference, work_width: int = 640) -> 
 
 @dataclass
 class HostEvidence:
-    """What one host answered for one camera, kept so the log can show its work."""
+    """What one host answered for one camera, kept so the log can show its work.
+
+    ``matches`` holds the picture comparison against *every* camera's reference frame,
+    not just the one whose password was tried. It costs nothing extra - the frame is
+    already in hand - and it is what lets the picture veto a claim even when only one
+    camera is being looked for.
+    """
 
     host: str
     camera: str
     credential_ok: bool = False
     resolution: str = ""
-    matches: int = 0
+    matches: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def own_matches(self) -> int:
+        """How well the frame matches the camera whose password opened this host."""
+        return self.matches.get(self.camera, 0)
+
+    def best_other(self) -> tuple[str, int] | None:
+        """The camera - other than this one - whose reference fits the frame best."""
+        others = {name: score for name, score in self.matches.items() if name != self.camera}
+        if not others:
+            return None
+        name, score = max(others.items(), key=lambda item: item[1])
+        return name, score
 
 
 @dataclass
@@ -359,12 +378,12 @@ def discover(
     names = list(cameras if cameras is not None else configured_cameras())
     urls = urls or {name: camera_rtsp_url(name) for name in names}
     if references is None:
+        # Every calibrated camera, not only the ones being looked for: the picture check
+        # needs the other rooms' reference frames to say "this frame is not the sofa".
         calibrations = load_calibrations()
         references = {
-            name: reference_features_for(calibrations[name], settings.work_width)
-            if name in calibrations
-            else None
-            for name in names
+            name: reference_features_for(calibration, settings.work_width)
+            for name, calibration in calibrations.items()
         }
 
     result = DiscoveryResult()
@@ -395,8 +414,10 @@ def discover(
         + (f"; {skipped} left alone (in use by a camera that is recording)" if skipped else "")
     )
 
-    # Every camera is asked of every reachable host, so a host can be recognised even
-    # when the credentials that were supposed to open it are stale.
+    # Every camera being looked for is asked of every reachable host, so a host can be
+    # recognised even when the credentials that were supposed to open it are stale.
+    # The picture is compared against every reference, which is local work on a frame
+    # that has already been grabbed.
     for name in names:
         for host in sorted(candidates):
             if host in skip_hosts or settings.rtsp_port not in candidates[host]:
@@ -408,18 +429,18 @@ def discover(
                 settings.frame_timeout_seconds,
                 settings.frames_to_try,
             )
-            matches = (
-                fingerprint(frame, references.get(name), settings.work_width)
-                if frame is not None
-                else 0
-            )
             result.evidence.append(
                 HostEvidence(
                     host=host,
                     camera=name,
                     credential_ok=frame is not None,
                     resolution=_resolution_of(frame),
-                    matches=matches,
+                    matches={
+                        other: fingerprint(frame, reference, settings.work_width)
+                        for other, reference in references.items()
+                    }
+                    if frame is not None
+                    else {},
                 )
             )
 
@@ -450,8 +471,8 @@ def _decide(
         if len(options) > 1:
             # Two addresses answered the same credentials. The picture decides,
             # and a tie is left to a human rather than guessed at.
-            ranked = sorted(options, key=lambda item: item.matches, reverse=True)
-            if ranked[0].matches <= ranked[1].matches:
+            ranked = sorted(options, key=lambda item: item.own_matches, reverse=True)
+            if ranked[0].own_matches <= ranked[1].own_matches:
                 result.missing.append(name)
                 result.notes.append(
                     f"{name}: ambiguous - {len(options)} addresses accept its password "
@@ -465,7 +486,7 @@ def _decide(
             chosen = ranked[0]
             result.notes.append(
                 f"{name}: {len(options)} addresses accept its password, "
-                f"picked {chosen.host} on the picture ({chosen.matches} feature pairs)"
+                f"picked {chosen.host} on the picture ({chosen.own_matches} feature pairs)"
             )
         else:
             chosen = options[0]
@@ -495,32 +516,27 @@ def _picture_agrees(
 ) -> bool:
     """Refuse a host whose picture clearly belongs to a different camera.
 
-    ``chosen.matches`` below the floor is not enough on its own - a night frame on
-    IR can score low against a daylight reference while still being the right room -
-    so it only vetoes when another camera's reference matches the same frame
-    *better than the floor*, which is what a shared password would look like.
+    A score below the floor is not enough on its own - a night frame on IR can score low
+    against a daylight reference while still being the right room - so it only vetoes
+    when another camera's reference matches the same frame *better than the floor*,
+    which is what a shared password would look like.
     """
-    if chosen.matches >= settings.min_fingerprint_matches:
+    if chosen.own_matches >= settings.min_fingerprint_matches:
         return True
-    others = [
-        evidence
-        for evidence in result.evidence
-        if evidence.host == chosen.host and evidence.camera != name
-    ]
-    better = max(others, key=lambda item: item.matches, default=None)
-    if better is not None and better.matches >= settings.min_fingerprint_matches:
+    better = chosen.best_other()
+    if better is not None and better[1] >= settings.min_fingerprint_matches:
         result.notes.append(
             f"{name}: {chosen.host} accepts its password but the picture matches "
-            f"{better.camera} far better ({better.matches} vs {chosen.matches}); left alone"
+            f"{better[0]} far better ({better[1]} vs {chosen.own_matches}); left alone"
         )
         log(
             f"[discovery] {name}: refused {chosen.host} - its frame looks like "
-            f"{better.camera} ({better.matches} vs {chosen.matches} feature pairs)"
+            f"{better[0]} ({better[1]} vs {chosen.own_matches} feature pairs)"
         )
         return False
     result.notes.append(
         f"{name}: {chosen.host} accepted by credentials, picture inconclusive "
-        f"({chosen.matches} feature pairs)"
+        f"({chosen.own_matches} feature pairs)"
     )
     return True
 
@@ -562,7 +578,8 @@ def describe(result: DiscoveryResult) -> list[str]:
         moved = f" (was {found.previous_host})" if found.moved else ""
         lines.append(
             f"{name:<11} -> {found.host}{moved}  "
-            f"[password ok, {found.evidence.matches} feature pairs, {found.evidence.resolution}]"
+            f"[password ok, {found.evidence.own_matches} feature pairs, "
+            f"{found.evidence.resolution}]"
         )
     for name in sorted(result.missing):
         lines.append(f"{name:<11} -> NOT FOUND")

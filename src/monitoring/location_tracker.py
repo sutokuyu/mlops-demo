@@ -625,12 +625,13 @@ def recover_camera(
 ) -> DiscoveryResult:
     """Search the network for this camera. Blocking; called from its own thread.
 
-    Every configured camera is identified on every reachable host, not just the one
-    that is down, because the picture check that guards against a shared password
-    needs the other cameras' reference frames to compare against. ``live_hosts``
-    keeps the search off the addresses a camera is *already* being recorded from.
+    Only this camera is looked for, so a healthy one can never be reported as missing
+    merely because the search was told to leave its address alone. The picture check
+    still compares against every camera's reference frame - that is local work on a
+    frame which has already been grabbed - and ``live_hosts`` keeps the search off the
+    addresses a camera is *already* being recorded from.
     """
-    result = discover(settings=discovery, skip_hosts=tuple(live_hosts))
+    result = discover(cameras=[tracker.name], settings=discovery, skip_hosts=tuple(live_hosts))
     found = result.found.get(tracker.name)
     if found is None:
         if not tracker.outage_reported:
