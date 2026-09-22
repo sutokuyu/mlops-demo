@@ -393,6 +393,37 @@ def test_the_search_waits_for_the_delay_and_then_respects_its_cooldown(monkeypat
     assert len(FakeThread.started) == 2
 
 
+def test_a_camera_that_just_flapped_keeps_its_address_protected() -> None:
+    """A camera on a link that is dropping frames is still a camera in use.
+
+    Measured on this network: the relay stalls all three streams for about thirty
+    seconds every few minutes. A search that raced those flaps would open streams on
+    cameras that are mid-reconnect, on the link that is already struggling.
+    """
+    discovery = DiscoverySettings(missing_after_seconds=120.0)
+    recording = a_movable_tracker()
+    recording.reader = FakeReaderState(connected=True)
+    flapping = a_movable_tracker()
+    flapping.name = "sofa"
+    flapping.rtsp_url = "rtsp://admin:pw@192.168.3.48:554/h264/ch1/main/av_stream"
+    flapping.reader = FakeReaderState(connected=False)
+    gone = a_movable_tracker()
+    gone.name = "living_room"
+    gone.rtsp_url = "rtsp://admin:pw@192.168.3.57:554/h264/ch1/main/av_stream"
+    gone.reader = FakeReaderState(connected=False)
+
+    location_tracker.note_connection_state(flapping, 1000.0, {})
+    location_tracker.note_connection_state(gone, 1000.0, {})
+
+    assert location_tracker.recording_hosts([recording, flapping], 1040.0, discovery) == {
+        "192.168.3.13",
+        "192.168.3.48",
+    }, "40 seconds down is a flap, not a camera that moved"
+    assert location_tracker.recording_hosts([recording, gone], 1400.0, discovery) == {
+        "192.168.3.13"
+    }, "past the delay the address is fair game, which is how a moved camera is found"
+
+
 def test_a_disabled_search_never_runs(monkeypatch) -> None:
     monkeypatch.setattr(location_tracker.threading, "Thread", FakeThread)
     FakeThread.started.clear()

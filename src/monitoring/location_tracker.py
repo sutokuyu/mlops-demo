@@ -495,6 +495,28 @@ def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
         tracker.reanchor_failure_reported = True
 
 
+def recording_hosts(
+    trackers: list[CameraTracker], now: float, discovery: DiscoverySettings
+) -> set[str]:
+    """Addresses the search must leave alone, because a camera is using them.
+
+    A camera that merely flapped still counts: measured on this network, the relay
+    drops all three streams for about thirty seconds every few minutes. A search that
+    raced those flaps would open streams on cameras that are in the middle of
+    reconnecting, on the same link that is already struggling. Only a camera that has
+    been gone long enough to be searched for at all gives up its protection - and that
+    is the camera being looked for, whose own address is excluded by the caller.
+    """
+    protected: set[str] = set()
+    for tracker in trackers:
+        if tracker.reader is None:
+            continue
+        down_for = now - tracker.unreachable_since if tracker.unreachable_since else 0.0
+        if tracker.reader.connected or down_for < discovery.missing_after_seconds:
+            protected.add(host_of(tracker.rtsp_url))
+    return protected
+
+
 def note_connection_state(tracker: CameraTracker, now: float, settings: dict, notify=None) -> None:
     """Track how long a camera has been unreachable, and report the turn-around once.
 
@@ -713,23 +735,20 @@ def run(args) -> None:
         while True:
             loop_start = time.monotonic()
             now = time.time()
-            # Addresses a camera is being recorded from right now. The search must not
-            # open a second stream on one of those: two concurrent lookups alongside
-            # the tracker were measured to stall a 2560x1440 handshake past 30 seconds
-            # and drop the tracker's own feeder stream.
-            recording_hosts = {
-                host_of(tracker.rtsp_url)
-                for tracker in trackers
-                if tracker.reader is not None and tracker.reader.connected
-            }
             for tracker in trackers:
                 note_connection_state(tracker, loop_start, settings)
+            # The search must not open a second stream on a camera that is being
+            # recorded, or on one that is merely reconnecting: two concurrent lookups
+            # alongside the tracker were measured to stall a 2560x1440 handshake past
+            # 30 seconds and drop the tracker's own feeder stream.
+            protected = recording_hosts(trackers, loop_start, discovery)
+            for tracker in trackers:
                 maybe_recover_camera(
                     tracker,
                     loop_start,
                     settings,
                     discovery,
-                    live_hosts=tuple(recording_hosts - {host_of(tracker.rtsp_url)}),
+                    live_hosts=tuple(protected - {host_of(tracker.rtsp_url)}),
                 )
             observations = sample_cameras(trackers, model, args)
             apply_observations(store, active_visits, best_observation_per_cat(observations), now)
