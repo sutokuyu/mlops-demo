@@ -13,6 +13,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.monitoring import location_report, location_tracker
 from src.monitoring.alignment import AlignmentTracker
+from src.monitoring.camera_discovery import (
+    DiscoveredCamera,
+    DiscoveryResult,
+    DiscoverySettings,
+    HostEvidence,
+)
 from src.monitoring.detections import bottom_center, select_best_per_class
 from src.monitoring.location_store import LocationStore
 from src.monitoring.location_zones import Calibration, Zone, find_zone
@@ -263,3 +269,191 @@ def test_daily_summary_aggregates_and_sorts_dwell_time(store, monkeypatch) -> No
     text = location_report.render_text(summary)
     assert "sofa" in text
     assert "bagel" in text
+
+
+# --- a camera that moved on the network -------------------------------------------
+#
+# A camera that is offline fails differently from a camera that drifted: alignment has
+# nothing to say about it, and the reader would retry the dead address forever. These
+# tests cover the rules that keep the recovery quiet enough to be worth reading - one
+# message per outage, a search that only starts after a delay, and a new address
+# adopted without restarting the tracker.
+
+
+class FakeReaderState:
+    """Only the part of StreamReader the health check looks at."""
+
+    def __init__(self, connected: bool) -> None:
+        self.connected = connected
+
+
+class FakeStreamReader:
+    """A StreamReader that connects to nothing."""
+
+    instances: list = []
+
+    def __init__(self, source, name="stream") -> None:
+        self.source = source
+        self.name = name
+        self.started = False
+        self.closed = False
+        FakeStreamReader.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeThread:
+    """A thread that records that it was created and never runs."""
+
+    started: list = []
+
+    def __init__(self, target=None, args=(), name="", daemon=False) -> None:
+        self.target = target
+        self.args = args
+        self.name = name
+        FakeThread.started.append(self)
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def recording_notify(sent: list):
+    def notify(settings, camera, content, attachment):
+        sent.append(content)
+        return True, "sent"
+
+    return notify
+
+
+def a_movable_tracker() -> location_tracker.CameraTracker:
+    return location_tracker.CameraTracker(
+        name="feeder",
+        rtsp_url="rtsp://admin:pw@192.168.3.13:554/h264/ch1/main/av_stream",
+        calibration=Calibration(camera="feeder", zones=[SOFA], calibration_id="feeder-1"),
+    )
+
+
+def test_an_unreachable_camera_is_timed_from_the_first_failed_sample() -> None:
+    tracker = a_movable_tracker()
+    tracker.reader = FakeReaderState(connected=False)
+    location_tracker.note_connection_state(tracker, 100.0, {})
+    assert tracker.unreachable_since == 100.0
+    location_tracker.note_connection_state(tracker, 200.0, {})
+    assert tracker.unreachable_since == 100.0, "the clock starts once, not every sample"
+
+
+def test_a_camera_that_answers_again_is_announced_once_and_re_arms_the_alert() -> None:
+    sent: list[str] = []
+    notify = recording_notify(sent)
+    tracker = a_movable_tracker()
+    tracker.reader = FakeReaderState(connected=False)
+    location_tracker.note_connection_state(tracker, 100.0, {}, notify)
+    assert sent == [], "still connected, so there is nothing to say"
+
+    tracker.outage_reported = True
+    tracker.relocated_from, tracker.relocated_to = "192.168.3.13", "192.168.3.59"
+    tracker.reader = FakeReaderState(connected=True)
+    location_tracker.note_connection_state(tracker, 200.0, {}, notify)
+    assert len(sent) == 1
+    assert "192.168.3.59" in sent[0], "the new address is the useful part of the news"
+    assert tracker.outage_reported is False, "so the next outage is news again"
+
+    location_tracker.note_connection_state(tracker, 300.0, {}, notify)
+    assert len(sent) == 1, "a camera that is up says nothing more"
+
+
+def test_the_search_waits_for_the_delay_and_then_respects_its_cooldown(monkeypatch) -> None:
+    monkeypatch.setattr(location_tracker.threading, "Thread", FakeThread)
+    FakeThread.started.clear()
+    tracker = a_movable_tracker()
+    tracker.reader = FakeReaderState(connected=False)
+    discovery = DiscoverySettings(missing_after_seconds=120.0, retry_seconds=300.0)
+
+    location_tracker.maybe_recover_camera(tracker, 1000.0, {}, discovery)
+    assert FakeThread.started == [], "no failed sample yet, so no clock to wait out"
+
+    location_tracker.note_connection_state(tracker, 1000.0, {})
+    location_tracker.maybe_recover_camera(tracker, 1100.0, {}, discovery)
+    assert FakeThread.started == [], "100s down is under the 120s delay"
+
+    location_tracker.maybe_recover_camera(tracker, 1200.0, {}, discovery)
+    assert len(FakeThread.started) == 1
+
+    tracker.discovery_thread = None  # as if the search had finished
+    location_tracker.maybe_recover_camera(tracker, 1300.0, {}, discovery)
+    assert len(FakeThread.started) == 1, "and not again inside the cooldown"
+    location_tracker.maybe_recover_camera(tracker, 1600.0, {}, discovery)
+    assert len(FakeThread.started) == 2
+
+
+def test_a_disabled_search_never_runs(monkeypatch) -> None:
+    monkeypatch.setattr(location_tracker.threading, "Thread", FakeThread)
+    FakeThread.started.clear()
+    tracker = a_movable_tracker()
+    tracker.reader = FakeReaderState(connected=False)
+    location_tracker.note_connection_state(tracker, 1000.0, {})
+    location_tracker.maybe_recover_camera(
+        tracker, 99999.0, {}, DiscoverySettings(enabled=False, missing_after_seconds=0.0)
+    )
+    assert FakeThread.started == []
+
+
+def test_a_camera_found_elsewhere_is_relocated_without_a_restart(monkeypatch) -> None:
+    FakeStreamReader.instances.clear()
+    monkeypatch.setattr(location_tracker, "StreamReader", FakeStreamReader)
+    tracker = a_movable_tracker()
+    dead_reader = FakeStreamReader("rtsp://admin:pw@192.168.3.13:554/x", "feeder")
+    tracker.reader = dead_reader
+
+    found = DiscoveredCamera(
+        camera="feeder",
+        host="192.168.3.59",
+        url="rtsp://admin:pw@192.168.3.59:554/h264/ch1/main/av_stream",
+        evidence=HostEvidence("192.168.3.59", "feeder", credential_ok=True, matches=79),
+        previous_host="192.168.3.13",
+    )
+    monkeypatch.setattr(
+        location_tracker, "discover", lambda **kwargs: DiscoveryResult(found={"feeder": found})
+    )
+
+    location_tracker.recover_camera(tracker, {}, DiscoverySettings())
+
+    assert tracker.rtsp_url.endswith("192.168.3.59:554/h264/ch1/main/av_stream")
+    assert tracker.reader is not dead_reader
+    assert tracker.reader.started and not tracker.reader.closed
+    assert dead_reader.closed, "the thread retrying the dead address has to be stopped"
+    assert tracker.relocated_to == "192.168.3.59"
+
+
+def test_a_camera_that_cannot_be_found_is_reported_once_per_outage(monkeypatch) -> None:
+    sent: list[str] = []
+    notify = recording_notify(sent)
+    tracker = a_movable_tracker()
+    monkeypatch.setattr(
+        location_tracker, "discover", lambda **kwargs: DiscoveryResult(missing=["feeder"])
+    )
+
+    location_tracker.recover_camera(tracker, {}, DiscoverySettings(), notify)
+    assert len(sent) == 1
+    assert "192.168.3.0/24" in sent[0], "the owner is told what was searched"
+    assert tracker.outage_reported is True
+
+    location_tracker.recover_camera(tracker, {}, DiscoverySettings(), notify)
+    assert len(sent) == 1, "a camera that stays missing is not worth repeating"
+
+    tracker.reader = FakeReaderState(connected=True)
+    location_tracker.note_connection_state(tracker, 5000.0, {}, notify)
+    assert len(sent) == 2, "it came back, which is news"
+    assert tracker.outage_reported is False
+
+    tracker.reader = FakeReaderState(connected=False)
+    location_tracker.note_connection_state(tracker, 6000.0, {})
+    location_tracker.recover_camera(tracker, {}, DiscoverySettings(), notify)
+    assert len(sent) == 3, "a new outage gets its own warning"

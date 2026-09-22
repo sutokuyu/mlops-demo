@@ -9,6 +9,52 @@ cameras:
   - sofa
   - feeder
 
+# 相机换了 IP 之后把它找回来。被找回来的地址会写回 .env，所以重启服务、或者手动跑
+# realtime_view，用的都是新地址；运行中的 tracker 则是自己就地换地址重连，不用重启。
+#
+# 为什么不是「记住 MAC」：相机挂在一个会改写源 MAC 的中继后面，中继下游的所有设备在
+# ARP 里报的是同一个硬件地址。2026-09-23 实测：192.168.3.0/24 里有 12 个地址（三台
+# 相机都在内）报同一个 MAC，所以 MAC 表只能说明「这台设备在中继后面」。路由器上的
+# DHCP 静态绑定同理做不了 —— 路由器看到的也是这一个 MAC。另外 WSL 是 NAT 模式，它
+# 自己的 ARP 表里根本不会有相机（它只 ARP 网关），所以扫描是从 WSL 直接连 TCP，
+# Windows 只当路由器转发。
+#
+# 身份取自设备本身，两个信号互相验证：
+#   凭据 - 每台相机有自己的 RTSP 密码，别人的密码会被 401 拒绝，准确且瞬间
+#   画面 - 从该地址抓一帧，用 zone 对齐的同一个 ORB 匹配器跟这台相机的参考帧比，
+#          这才是真正在回答「这是哪个房间」；密码万一重了也只有它能分辨
+# 两者都过才认领（凭据通过、且画面不反对）。画面明显更像另一台相机时拒绝认领——
+# 认错比连不上更糟：连不上只是丢样本，认错是把一个房间的猫记到另一个房间的区域里。
+discovery:
+  enabled: true
+  # 相机换了 IP 但仍然在同一个局域网里，所以默认只扫这一个网段。
+  subnets:
+    - 192.168.3.0/24
+  # 认为「这里有台相机」的端口。554 是 RTSP；8000 是海康的 SDK 端口，用来在找不到
+  # 相机时提示「这里有台设备，但 RTSP 没应答，可能是 RTSP 被关了」。
+  rtsp_port: 554
+  hint_ports:
+    - 8000
+  # 连不上的相机多久之后开始找它，以及找到之前每隔多久再找一次。
+  missing_after_seconds: 120
+  retry_seconds: 300
+  # 扫 254 个地址时的单点超时与并发。串行扫要几分钟，而这个会跑在 tracker 里面。
+  host_timeout_seconds: 0.6
+  max_workers: 128
+  # 没应答的地址再问一遍。ARP 条目过期时第一个包会在解析地址的过程中被丢掉，而解析
+  # 比一次短连接的超时更长。实测：192.168.3.59 在表项热的时候 20/20 次都通，但紧接
+  # 着表项过期的那一次扫描整台相机都没找到。漏掉是这里代价最高的错误（会被读成「相机
+  # 没了」），所以第二遍很便宜。
+  scan_attempts: 2
+  # 抓一帧的代价：一次 DESCRIBE 加等一个关键帧。
+  frame_timeout_seconds: 8
+  frames_to_try: 10
+  # 画面指纹的判定线。真实那一次：「喂食器」79 对，次名 10 对。
+  # 这是「否决线」而不是身份判据：夜里的红外帧对上白天的参考帧点数会偏低，
+  # 所以只有当另一台相机的参考帧反而超过这条线时才否决。
+  min_fingerprint_matches: 12
+  work_width: 640
+
 # Browser preview and zone editor. WSLg cannot keep an OpenCV window visible
 # when the monitor layout changes, so the operator UI is served over HTTP.
 preview:

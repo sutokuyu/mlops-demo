@@ -14,15 +14,23 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SOURCE="$PROJECT_ROOT/deploy/systemd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNITS=(cat-tracker.service cat-report.service cat-report.timer cat-discord.service)
+UNITS=(
+    cat-tracker.service
+    cat-report.service
+    cat-report.timer
+    cat-discord.service
+    cat-camera-ip.service
+    cat-camera-ip.timer
+)
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     systemctl --user disable --now cat-tracker.service cat-report.timer cat-discord.service || true
+    systemctl --user disable --now cat-camera-ip.timer || true
     for unit in "${UNITS[@]}"; do
         rm -f "$UNIT_DIR/$unit"
     done
     systemctl --user daemon-reload
-    echo "Removed the cat tracker service, the report timer and the Discord bot."
+    echo "Removed the cat tracker service, the report timer, the Discord bot and the camera lookup."
     exit 0
 fi
 
@@ -44,6 +52,11 @@ if [[ "$(loginctl show-user "$USER" -p Linger --value)" != "yes" ]]; then
 fi
 
 systemctl --user enable --now cat-report.timer
+
+# The address lookup is a safety net around the tracker, which relocates itself
+# without a restart. It is enabled whatever the preflights below decide, because a
+# tracker that refused to start is exactly when a correct .env matters most.
+systemctl --user enable --now cat-camera-ip.timer
 
 # Starting a service whose preflight already fails only produces a failed unit and
 # burns its restart budget, so each launcher is asked first. The reason is kept
@@ -81,6 +94,8 @@ Useful commands:
     systemctl --user start cat-report.service       # send one now, to test
     systemctl --user status cat-discord.service     # is the bot connected
     journalctl --user -u cat-discord -f             # live bot log
+    systemctl --user list-timers cat-camera-ip.timer  # when the camera lookup runs
+    ./scripts/sync_camera_ips.py --explain          # where the cameras are right now
 
 The tracker is only restarted 10 times per 5 minutes. If startup is broken it
 gives up in a failed state; after fixing the cause, reset it with:

@@ -31,6 +31,22 @@ set -a
 source "$PROJECT_ROOT/.env"
 set +a
 
+# The cameras hang behind a relay that hands them a new address every so often, and a
+# stale URL is invisible until a camera quietly stops being recorded. Fix the file
+# before the preflight below, so the URLs that get checked are the ones that will be
+# used. Skipped while the installer is only probing (TRACKER_CHECK_ONLY), and never
+# fatal: a camera that is simply unplugged must not stop the other two from running.
+if [[ -z "${TRACKER_CHECK_ONLY:-}" && -z "${SKIP_CAMERA_SYNC:-}" ]]; then
+    if ! "$PYTHON" -u "$PROJECT_ROOT/scripts/sync_camera_ips.py" --apply; then
+        echo "run_tracker: camera address sync did not come back clean; continuing" >&2
+    fi
+    # The sync may have rewritten .env, so re-read it before anything validates it.
+    set -a
+    # shellcheck disable=SC1091
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
 # config_loader substitutes ${VAR:} with an empty string, so a camera whose URL
 # was never exported fails much later with a bare "could not open stream". The
 # check goes through the project's own config loader rather than a hardcoded

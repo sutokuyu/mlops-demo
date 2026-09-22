@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep the camera addresses in .env current
+
+[Timer]
+# The tracker relocates itself the moment a camera moves, without a restart, so this
+# timer only keeps the file that every *other* entry point reads (run_tracker.sh,
+# realtime_view, the browser preview) pointing at the right place - and it heals the
+# case where nothing is running at all. Five minutes late is soon enough for that.
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

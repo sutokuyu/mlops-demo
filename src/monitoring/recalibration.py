@@ -31,6 +31,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.monitoring import alerting
 from src.monitoring.alert_voice import phrase_alert
 from src.monitoring.alignment import (
     USE_FRAME,
@@ -54,7 +55,6 @@ from src.monitoring.location_zones import (
     save_calibrations,
 )
 from src.monitoring.rtsp_stream import StreamReader
-from src.notification.notification_controller import post_discord_message
 
 ZONE_COLOR = (0, 255, 0)
 OFF_FRAME_COLOR = (0, 0, 255)
@@ -154,18 +154,18 @@ def describe_reason(reason: str) -> str:
     return reason
 
 
-def _notifications_enabled(settings: dict) -> bool:
-    return bool(settings.get("discord_webhook")) and settings.get("notify") is not False
-
-
 def _alert_content(event: str, settings: dict, facts: dict, fallback: str) -> str:
     """Phrase an alert, but only when it is actually going to be sent.
 
     Skipping the call when notifications are off keeps the tracker from spending a
     network round trip - inside its sampling loop - on a message that will be
     dropped anyway.
+
+    Deliberately calls this module's own ``phrase_alert`` rather than the shared
+    ``alerting.alert_content``, because that name is the seam the tests use to watch
+    what would have been said.
     """
-    if not _notifications_enabled(settings):
+    if not alerting.notifications_enabled(settings):
         return fallback
     return phrase_alert(event, facts, fallback)
 
@@ -175,19 +175,11 @@ def _notify(settings: dict, camera: str, content: str, attachment: Path | None) 
 
     The caller uses the flag to decide whether the attachment is still needed: once
     Discord holds the image, a local copy is duplicated storage that piles up.
+
+    The plumbing lives in ``alerting`` so the camera-discovery alerts obey the same
+    rules - no webhook, no send; no User-Agent, Cloudflare rejects it.
     """
-    webhook_url = settings.get("discord_webhook") or ""
-    if not _notifications_enabled(settings):
-        return False, "notification skipped (no webhook configured)"
-    try:
-        post_discord_message(
-            {"content": content, "username": settings.get("discord_username") or camera},
-            [attachment] if attachment is not None else None,
-            webhook_url=webhook_url,
-        )
-    except (OSError, RuntimeError, ValueError) as error:
-        return False, f"notification failed: {error}"
-    return True, "overlay sent to Discord"
+    return alerting.notify(settings, camera, content, attachment)
 
 
 def reanchor(
