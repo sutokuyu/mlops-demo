@@ -3,7 +3,7 @@ project:
   root: .
 
 models:
-  identity_detection_model_path: models/yolo26n_retrain_1/weights/best.pt
+  identity_detection_model_path: models/yolo26s_640_e100/weights/best.pt
 
 cats:
   identity_classes:
