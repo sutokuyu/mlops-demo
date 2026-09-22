@@ -242,6 +242,13 @@ scripts/sync_camera_ips.py --explain     # what every reachable address answered
 `run_tracker.sh` runs it once before starting. It exits `2` when a camera is still
 missing, which is a warning about the camera rather than a failure of the job.
 
+While the tracker is recording, that lookup **stands down** (and a lock keeps two
+of them from running at once). An address is identified by opening a stream on the
+camera, which competes with the recording for the same relay link - measured: two
+lookups alongside the tracker stalled a 2560x1440 handshake past 30 seconds and the
+tracker dropped its stream on another camera. In that state the tracker maintains
+`.env` itself, and `--force` looks anyway for a diagnosis done on purpose.
+
 **How a camera is identified - and why it is not by MAC.** The relay rewrites the
 source MAC, so every device behind it answers ARP with the same hardware address
 (measured on this network: twelve addresses in `192.168.3.0/24`, all three cameras

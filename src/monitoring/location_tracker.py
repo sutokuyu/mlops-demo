@@ -27,6 +27,8 @@ from src.monitoring.alignment import GOOD, AlignmentTracker, transform_point
 from src.monitoring.camera_discovery import (
     DiscoveryResult,
     DiscoverySettings,
+    apply_hosts_to_env,
+    camera_env_vars,
     discover,
     discovery_settings,
     host_of,
@@ -45,6 +47,7 @@ from src.monitoring.location_config import (
     DEFAULT_IDENTITY_MODEL,
     IDENTITY_CLASSES,
     LOCATION_CONFIG,
+    PROJECT_ROOT,
     TRACKING_CONFIG,
     alignment_settings,
     camera_rtsp_url,
@@ -563,12 +566,42 @@ def report_camera_recovered(tracker: CameraTracker, settings: dict, notify=None)
     print(f"[{tracker.name}] camera recovered: {note}")
 
 
+def remember_address(
+    camera: str,
+    host: str,
+    env_path: Path | None = None,
+    variables: dict[str, str] | None = None,
+) -> None:
+    """Write a camera's new address into .env, so a restart uses it too.
+
+    Best-effort on purpose: a failed write deserves a log line, never the samples the
+    relocation just restored. The sync script fixes the file on its next run.
+    """
+    variable = (camera_env_vars() if variables is None else variables).get(camera)
+    if variable is None:
+        print(f"[{camera}] names no ${{VAR}} in config.yaml, so .env was not updated")
+        return
+    path = env_path if env_path is not None else PROJECT_ROOT / ".env"
+    try:
+        changes = apply_hosts_to_env(path, {variable: host})
+    except OSError as error:
+        print(f"[{camera}] could not update .env: {error}")
+        return
+    for key, (old_host, new_host) in changes.items():
+        print(f"[{camera}] .env updated: {key} {old_host} -> {new_host}")
+
+
 def relocate_camera(tracker: CameraTracker, host: str, url: str) -> None:
     """Point a camera at a new address and reconnect, without restarting the tracker.
 
     A fresh StreamReader rather than an assignment on the old one: the reader owns a
     thread that is retrying the dead address, and it has no other way to be told to
     stop or to change target.
+
+    .env is rewritten here as well, and this is the ordinary path for it: the tracker
+    is the only component that learns a camera moved without opening a second stream
+    to find out, and the lookup on the timer deliberately stands down while the
+    tracker is running so that it cannot compete with these recordings.
     """
     previous = tracker.reader
     tracker.relocated_from = host_of(tracker.rtsp_url)
@@ -580,6 +613,7 @@ def relocate_camera(tracker: CameraTracker, host: str, url: str) -> None:
         previous.close()
     tracker.unreachable_since = 0.0
     print(f"[{tracker.name}] answering again at {host} (was {tracker.relocated_from})")
+    remember_address(tracker.name, host)
 
 
 def recover_camera(
@@ -587,14 +621,16 @@ def recover_camera(
     settings: dict,
     discovery: DiscoverySettings,
     notify=None,
+    live_hosts: tuple[str, ...] = (),
 ) -> DiscoveryResult:
     """Search the network for this camera. Blocking; called from its own thread.
 
     Every configured camera is identified on every reachable host, not just the one
     that is down, because the picture check that guards against a shared password
-    needs the other cameras' reference frames to compare against.
+    needs the other cameras' reference frames to compare against. ``live_hosts``
+    keeps the search off the addresses a camera is *already* being recorded from.
     """
-    result = discover(settings=discovery)
+    result = discover(settings=discovery, skip_hosts=tuple(live_hosts))
     found = result.found.get(tracker.name)
     if found is None:
         if not tracker.outage_reported:
@@ -615,6 +651,7 @@ def maybe_recover_camera(
     settings: dict,
     discovery: DiscoverySettings,
     notify=None,
+    live_hosts: tuple[str, ...] = (),
 ) -> None:
     """Go looking for a camera that has been unreachable for long enough.
 
@@ -632,7 +669,7 @@ def maybe_recover_camera(
     tracker.last_discovery_at = now
     tracker.discovery_thread = threading.Thread(
         target=recover_camera,
-        args=(tracker, settings, discovery, notify),
+        args=(tracker, settings, discovery, notify, live_hosts),
         name=f"discover-{tracker.name}",
         daemon=True,
     )
@@ -675,9 +712,24 @@ def run(args) -> None:
         while True:
             loop_start = time.monotonic()
             now = time.time()
+            # Addresses a camera is being recorded from right now. The search must not
+            # open a second stream on one of those: two concurrent lookups alongside
+            # the tracker were measured to stall a 2560x1440 handshake past 30 seconds
+            # and drop the tracker's own feeder stream.
+            recording_hosts = {
+                host_of(tracker.rtsp_url)
+                for tracker in trackers
+                if tracker.reader is not None and tracker.reader.connected
+            }
             for tracker in trackers:
                 note_connection_state(tracker, loop_start, settings)
-                maybe_recover_camera(tracker, loop_start, settings, discovery)
+                maybe_recover_camera(
+                    tracker,
+                    loop_start,
+                    settings,
+                    discovery,
+                    live_hosts=tuple(recording_hosts - {host_of(tracker.rtsp_url)}),
+                )
             observations = sample_cameras(trackers, model, args)
             apply_observations(store, active_visits, best_observation_per_cat(observations), now)
             for tracker in trackers:

@@ -1,12 +1,14 @@
 """Tests for finding the cameras again after the network moves them.
 
-Nothing here touches a network or a camera: the scan, the stream open and the picture
-match are all injected, the same way the tracker tests fake a reader. The rules under
-test are the ones that were expensive to get right - which signal decides identity,
-and what to do when the evidence disagrees.
+Nothing here needs a camera, a GPU or a network: the scan, the stream open and the
+picture match are all injected, the same way the tracker tests fake a reader. The one
+test that opens a socket listens on localhost and answers nothing, so it can measure
+what a stalled camera costs. The rules under test are the ones that were expensive to
+get right - which signal decides identity, and what to do when the evidence disagrees.
 """
 
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +17,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.monitoring.camera_discovery import (
     DiscoverySettings,
+    apply_hosts_to_env,
+    camera_env_vars,
     discover,
     discovery_settings,
+    frame_from_url,
     host_of,
     hosts_in_subnet,
     open_hosts,
@@ -84,7 +89,14 @@ def settings(**overrides) -> DiscoverySettings:
 
 
 def run(
-    network, candidates, *, names=CAMERAS, log=None, configured_host="192.168.3.9", **overrides
+    network,
+    candidates,
+    *,
+    names=CAMERAS,
+    log=None,
+    configured_host="192.168.3.9",
+    skip_hosts=(),
+    **overrides,
 ):
     return discover(
         cameras=list(names),
@@ -92,6 +104,7 @@ def run(
         urls={name: url_for(name, configured_host) for name in names},
         references=dict(REFERENCES),
         candidates=candidates,
+        skip_hosts=tuple(skip_hosts),
         opener=network.opener,
         fingerprint=network.fingerprint,
         log=log or (lambda *args, **kwargs: None),
@@ -172,6 +185,62 @@ def test_only_the_ports_that_answered_are_reported() -> None:
 
     found = open_hosts(("192.168.3.0/24",), (554, 8000), 0.01, 64, connector=connector)
     assert found == {"192.168.3.45": (8000,)}
+
+
+def _silent_peer():
+    """A socket that accepts connections and then never answers, like a stalled camera.
+
+    Returns the listener, a way to stop it, and the connections it is holding open -
+    nothing can be read from them, which is the whole point.
+    """
+    import socket
+    import threading
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    held: list = []
+    stop = threading.Event()
+
+    def accept_forever():
+        while not stop.is_set():
+            try:
+                held.append(listener.accept()[0])
+            except OSError:
+                return
+
+    threading.Thread(target=accept_forever, daemon=True).start()
+    return listener, stop, held
+
+
+def test_a_silent_peer_costs_the_configured_timeout_and_not_thirty_seconds() -> None:
+    """This one was measured the hard way, and it took the tracker down with it.
+
+    The open timeout used to be set *after* the constructor, which is too late: the
+    backend had already opened with its own 30 second default. Two lookups then held a
+    stalled handshake each, the relay link saturated, and the tracker lost the stream on
+    a camera that was perfectly healthy. A peer that accepts the connection and never
+    answers is exactly what the camera did for those 30 seconds.
+    """
+    listener, stop, held = _silent_peer()
+    try:
+        start = time.monotonic()
+        frame = frame_from_url(
+            f"rtsp://127.0.0.1:{listener.getsockname()[1]}/h264/ch1/main/av_stream", 1.0, 2
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        stop.set()
+        listener.close()
+        for connection in held:
+            connection.close()
+
+    assert frame is None
+    assert elapsed < 10, (
+        f"the open took {elapsed:.1f}s, so the configured timeout was ignored and the "
+        "backend fell back to its own 30 second default"
+    )
 
 
 # --- who is who ------------------------------------------------------------------
@@ -291,6 +360,28 @@ def test_disabled_discovery_looks_for_nothing() -> None:
     assert network.opened == []
 
 
+def test_a_host_a_camera_is_recording_from_is_never_opened() -> None:
+    """The search runs on a camera's behalf, not on its neighbours'.
+
+    Opening a second stream on a camera that is already being recorded competes for the
+    same relay link. Measured: two lookups alongside the tracker stalled a 2560x1440
+    handshake past 30 seconds and the tracker lost its stream on the other camera. So
+    the address a healthy camera is on is not touched, and the camera currently
+    recording from it is not disturbed to re-learn something already known.
+    """
+    network = FakeNetwork({"living_room": "192.168.3.57", "feeder": "192.168.3.59"})
+    result = run(
+        network,
+        {"192.168.3.57": (554,), "192.168.3.59": (554,)},
+        names=["feeder"],
+        skip_hosts=("192.168.3.57",),
+    )
+    assert result.found["feeder"].host == "192.168.3.59"
+    assert [host for host, _ in network.opened] == ["192.168.3.59"], (
+        "the address in use by the recording camera was never opened"
+    )
+
+
 # --- reading the settings --------------------------------------------------------
 
 
@@ -369,3 +460,43 @@ def test_rewrite_env_text_leaves_a_line_it_cannot_parse() -> None:
     updated, changes = rewrite_env_text(text, {"FEEDER_RTSP_URL": "192.168.3.59"})
     assert changes == {}
     assert updated == text
+
+
+def test_apply_hosts_to_env_writes_the_file_and_keeps_the_previous_one(tmp_path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(ENV, encoding="utf-8")
+
+    changes = apply_hosts_to_env(env, {"FEEDER_RTSP_URL": "192.168.3.59"})
+
+    assert changes == {"FEEDER_RTSP_URL": ("192.168.3.13", "192.168.3.59")}
+    assert "192.168.3.59" in env.read_text(encoding="utf-8")
+    assert (tmp_path / ".env.bak").read_text(encoding="utf-8") == ENV, (
+        "the previous file is one rename away from being restored"
+    )
+
+
+def test_apply_hosts_to_env_writes_nothing_when_it_is_already_right(tmp_path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(ENV, encoding="utf-8")
+
+    assert apply_hosts_to_env(env, {"FEEDER_RTSP_URL": "192.168.3.13"}) == {}
+    assert not (tmp_path / ".env.bak").exists(), "no backup without a change"
+
+
+def test_camera_env_vars_reads_the_placeholder_out_of_the_config(tmp_path) -> None:
+    """The variable name comes from the file, not from ``NAME.upper() + "_RTSP_URL"``.
+
+    Guessing would leave a renamed variable pointing at a key nothing reads, and the
+    symptom of that is a camera that never moves - months later, silently.
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "identity_collection:\n"
+        "  cameras:\n"
+        "    - name: feeder\n"
+        "      rtsp_url: ${A_RENAMED_VARIABLE:}\n"
+        "    - name: sofa\n"
+        "      rtsp_url: rtsp://literal/stream\n",
+        encoding="utf-8",
+    )
+    assert camera_env_vars(config) == {"feeder": "A_RENAMED_VARIABLE"}

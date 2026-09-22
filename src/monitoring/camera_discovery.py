@@ -40,15 +40,23 @@ while ``living_room`` and ``sofa`` are both 2560x1440.
 import ipaddress
 import os
 import re
+import shutil
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
 
 from src.monitoring.alignment import estimate_alignment
-from src.monitoring.location_config import LOCATION_CONFIG, camera_rtsp_url, configured_cameras
+from src.monitoring.location_config import (
+    LOCATION_CONFIG,
+    PROJECT_ROOT,
+    camera_rtsp_url,
+    configured_cameras,
+)
 from src.monitoring.location_zones import load_calibrations
 from src.monitoring.recalibration import reference_features_for
 
@@ -95,6 +103,10 @@ RETRY_SECONDS = 300.0
 URL_PATTERN = re.compile(
     r"(?P<prefix>[a-zA-Z][\w+.-]*://(?:[^/\s]*@)?)(?P<host>[^/:\s@]+)(?P<rest>(?::\d+)?(?:/\S*)?)"
 )
+
+# ``${VAR:default}`` in configs/config.yaml, which is where a camera's address comes
+# from and how this module finds the .env key that has to be rewritten.
+PLACEHOLDER_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::[^}]*)?\}")
 
 
 @dataclass(frozen=True)
@@ -223,14 +235,34 @@ def frame_from_url(
 ) -> np.ndarray | None:
     """One frame from a stream, or None when it cannot be read at all.
 
-    A refused connection and a wrong password both end up here: nobody needs to
-    tell them apart, because both mean "not this camera at this address".
+    A refused connection and a wrong password both end up here: nobody needs to tell
+    them apart, because both mean "not this camera at this address".
+
+    The timeout is passed to the *constructor*, which is the only place it has an
+    effect on opening - ``set(CAP_PROP_OPEN_TIMEOUT_MSEC)`` after the fact is read
+    too late, and the backend falls back to its own 30 seconds. That was measured the
+    hard way: a stalled handshake held a lookup for half a minute per attempt, and
+    with two lookups running at once the whole tracker appeared to be broken.
     """
     os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
     milliseconds = max(1000, int(timeout_seconds * 1000))
-    capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     try:
+        capture = cv2.VideoCapture(
+            url,
+            cv2.CAP_FFMPEG,
+            [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                milliseconds,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                milliseconds,
+            ],
+        )
+    except TypeError:
+        # Older OpenCV builds have no parameter form, so fall back to the constructor
+        # plus a best-effort set(). Worse, but not worse than not working at all.
+        capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, milliseconds)
+    try:
         capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, milliseconds)
         if not capture.isOpened():
             return None
@@ -304,12 +336,20 @@ def discover(
     urls: dict[str, str] | None = None,
     references: dict | None = None,
     candidates: dict[str, tuple[int, ...]] | None = None,
+    skip_hosts: tuple[str, ...] = (),
     connector=tcp_open,
     opener=frame_from_url,
     fingerprint=fingerprint_matches,
     log=print,
 ) -> DiscoveryResult:
     """Look for every requested camera and report where each one answers.
+
+    ``skip_hosts`` are addresses not to touch at all. The tracker passes the hosts its
+    *connected* cameras are using: those cameras are fine where they are, and opening
+    a second stream on one costs real bandwidth on a camera that is already being
+    recorded through a Wi-Fi relay - measured: two lookups running alongside the
+    tracker stalled a 2560x1440 handshake past 30 seconds and the tracker's own stream
+    dropped.
 
     The expensive bits - the subnet scan, opening a stream, matching a frame - are
     injectable so the rules can be tested without a network or a GPU, the same way
@@ -346,18 +386,21 @@ def discover(
     answered = ", ".join(
         f"{host} ({'/'.join(str(port) for port in ports)})"
         for host, ports in sorted(candidates.items())
+        if host not in skip_hosts
     )
+    skipped = len([host for host in candidates if host in skip_hosts])
     log(
         f"[discovery] {len(candidates)} host(s) answered on "
         f"{', '.join(settings.subnets)}: {answered or 'none'}"
+        + (f"; {skipped} left alone (in use by a camera that is recording)" if skipped else "")
     )
 
     # Every camera is asked of every reachable host, so a host can be recognised even
     # when the credentials that were supposed to open it are stale.
     for name in names:
         for host in sorted(candidates):
-            if settings.rtsp_port not in candidates[host]:
-                # Nothing to open a stream against. Hosts like this are still worth
+            if host in skip_hosts or settings.rtsp_port not in candidates[host]:
+                # Nothing to open a stream against. Hosts with no RTSP are still worth
                 # knowing about, and _explain_missing names them.
                 continue
             frame = opener(
@@ -524,6 +567,47 @@ def describe(result: DiscoveryResult) -> list[str]:
     for name in sorted(result.missing):
         lines.append(f"{name:<11} -> NOT FOUND")
     return lines
+
+
+def camera_env_vars(config_path: Path | None = None) -> dict[str, str]:
+    """Map each configured camera to the environment variable holding its URL.
+
+    Read straight from the YAML, because the ``${VAR}`` placeholder is exactly what is
+    being looked for and ``load_config`` would have already replaced it with the
+    current - possibly wrong - value. Going through the config instead of guessing at
+    ``NAME.upper() + "_RTSP_URL"`` means a renamed variable cannot silently leave a
+    caller writing to a key nothing reads.
+    """
+    path = (
+        Path(config_path) if config_path is not None else PROJECT_ROOT / "configs" / "config.yaml"
+    )
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    mapping: dict[str, str] = {}
+    for camera in (raw.get("identity_collection") or {}).get("cameras") or []:
+        name = camera.get("name")
+        match = PLACEHOLDER_PATTERN.search(str(camera.get("rtsp_url") or ""))
+        if name and match:
+            mapping[str(name)] = match.group("name")
+    return mapping
+
+
+def apply_hosts_to_env(
+    env_path: Path, hosts: dict[str, str], backup: bool = True
+) -> dict[str, tuple[str, str]]:
+    """Point the named keys in .env at new hosts, keeping a ``.bak`` of the old file.
+
+    Only the host changes; see ``rewrite_env_text``. Written by whichever component
+    learned the new address - the tracker when it relocates a camera, the sync script
+    when it runs on its own - so both go through this one path.
+    """
+    env_path = Path(env_path)
+    updated, changes = rewrite_env_text(env_path.read_text(encoding="utf-8"), hosts)
+    if not changes:
+        return {}
+    if backup:
+        shutil.copy2(env_path, env_path.with_name(env_path.name + ".bak"))
+    env_path.write_text(updated, encoding="utf-8")
+    return changes
 
 
 # ``KEY=value`` with optional ``export``, and a value that is one bare word optionally

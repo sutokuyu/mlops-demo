@@ -408,6 +408,14 @@ def test_a_disabled_search_never_runs(monkeypatch) -> None:
 def test_a_camera_found_elsewhere_is_relocated_without_a_restart(monkeypatch) -> None:
     FakeStreamReader.instances.clear()
     monkeypatch.setattr(location_tracker, "StreamReader", FakeStreamReader)
+    # The real one would edit this repo's .env, which is the point of it - but not
+    # from a test. Its own behaviour is covered below.
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        location_tracker,
+        "remember_address",
+        lambda camera, host: recorded.append((camera, host)),
+    )
     tracker = a_movable_tracker()
     dead_reader = FakeStreamReader("rtsp://admin:pw@192.168.3.13:554/x", "feeder")
     tracker.reader = dead_reader
@@ -430,6 +438,42 @@ def test_a_camera_found_elsewhere_is_relocated_without_a_restart(monkeypatch) ->
     assert tracker.reader.started and not tracker.reader.closed
     assert dead_reader.closed, "the thread retrying the dead address has to be stopped"
     assert tracker.relocated_to == "192.168.3.59"
+    assert recorded == [("feeder", "192.168.3.59")], "so a restart comes up here too"
+
+
+def test_the_new_address_is_written_back_to_env(tmp_path) -> None:
+    """A restart has to come up on the address that was just adopted."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "FEEDER_RTSP_URL='rtsp://admin:pw@192.168.3.13:554/h264/ch1/main/av_stream'\n",
+        encoding="utf-8",
+    )
+
+    location_tracker.remember_address(
+        "feeder", "192.168.3.59", env_path=env, variables={"feeder": "FEEDER_RTSP_URL"}
+    )
+
+    assert "192.168.3.59" in env.read_text(encoding="utf-8")
+    assert (tmp_path / ".env.bak").exists()
+
+
+def test_a_camera_with_no_placeholder_leaves_env_alone(tmp_path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("FEEDER_RTSP_URL='rtsp://admin:pw@192.168.3.13:554/x'\n", encoding="utf-8")
+
+    location_tracker.remember_address("feeder", "192.168.3.59", env_path=env, variables={})
+
+    assert "192.168.3.13" in env.read_text(encoding="utf-8")
+
+
+def test_an_unwritable_env_does_not_raise(tmp_path) -> None:
+    """Losing the samples a relocation just restored would be the worse failure."""
+    location_tracker.remember_address(
+        "feeder",
+        "192.168.3.59",
+        env_path=tmp_path / "missing" / ".env",
+        variables={"feeder": "FEEDER_RTSP_URL"},
+    )
 
 
 def test_a_camera_that_cannot_be_found_is_reported_once_per_outage(monkeypatch) -> None:
