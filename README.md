@@ -182,6 +182,10 @@ The canvas draws polygons in the camera's reference frame and saves them to
 a crosshair on its bottom-centre anchor, which is the point zone lookup uses, so
 what you see is what the tracker will match.
 
+Editing a polygon that is already saved: click empty space to start a new one, or
+**drag any drawn corner** to nudge it. Handles only respond while 显示区域描点 is
+ticked, and nothing is written until 保存区域 is pressed.
+
 ### 6. Re-anchor after the camera moved
 
 If a camera is knocked out of place, or alignment quality drops to `degraded`,
