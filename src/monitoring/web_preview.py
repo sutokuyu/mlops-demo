@@ -86,6 +86,11 @@ class CameraFeed:
     frame_count: int = 0
     detections: int = 0
     best_confidence: float = 0.0
+    # How many browsers are subscribed to this camera's MJPEG right now. The app uses
+    # it to decide which cameras are worth holding an RTSP session open for: this
+    # machine already records all of them through one Wi-Fi relay, and a preview that
+    # quietly adds a session per camera competes with the recording for that link.
+    watchers: int = 0
 
     @property
     def age_seconds(self) -> float | None:
@@ -108,6 +113,25 @@ class FrameHub:
     def names(self) -> list[str]:
         with self.lock:
             return list(self.feeds)
+
+    def watch(self, name: str) -> None:
+        """Record that a browser has subscribed to this camera's stream."""
+        with self.lock:
+            feed = self.feeds.get(name)
+            if feed is not None:
+                feed.watchers += 1
+
+    def unwatch(self, name: str) -> None:
+        """A subscriber went away - the tab was closed, or switched to another camera."""
+        with self.lock:
+            feed = self.feeds.get(name)
+            if feed is not None:
+                feed.watchers = max(0, feed.watchers - 1)
+
+    def watched(self) -> set[str]:
+        """Cameras with at least one live subscriber, i.e. the tab being looked at."""
+        with self.lock:
+            return {name for name, feed in self.feeds.items() if feed.watchers > 0}
 
     def get(self, name: str) -> CameraFeed | None:
         """Return a shallow copy so readers never observe a half-written feed."""
@@ -504,20 +528,32 @@ INDEX_HTML = """<!doctype html>
     <label class="toggle">
       <input type="checkbox" id="show-zones" checked> 显示区域描点
     </label>
-    <div class="msg" id="msg">左键点击开始绘制区域。</div>
+    <div class="msg" id="msg">左键点击开始绘制区域，或拖拽已保存区域的顶点微调。</div>
     <h2>已保存区域</h2>
     <ul id="zone-list"></ul>
     <p class="hint">
       画的是<b>猫站立的表面</b>（桌面、桌下地面、沙发坐垫、地板），<br>
       不是家具轮廓——判定用的锚点是检测框的<b>底边中点</b>。<br>
       留一个覆盖整片可见地面的 <b>floor</b> 兜底。<br>
-      同一个名字可以重复使用，等于给同一位置追加第二块多边形。
+      同一个名字可以重复使用，等于给同一位置追加第二块多边形。<br>
+      <b>拖拽</b>已保存区域上的圆点可以微调单个顶点，松手后记得保存。
     </p>
   </aside>
 </main>
 <script>
 const PALETTE = ["#4ade80","#60a5fa","#f472b6","#fbbf24","#a78bfa","#22d3ee","#fb7185","#34d399"];
 const state = { cameras: [], camera: null, zones: {}, draft: [] };
+
+// Vertex handles for zones that are already drawn. The hit radius is deliberately
+// larger than the drawn dot: these polygons are annotated on a 2560x1440 frame shown
+// downscaled, so a corner has to be grabbable without hunting for the pixel. Nothing
+// here is a new source of truth - a drag edits the same points array that gets saved.
+const HANDLE_RADIUS = 5;
+const HANDLE_ACTIVE_RADIUS = 8;
+const HIT_RADIUS = 11;
+let drag = null;
+let hover = null;
+let grabbed = false;
 
 const stream = document.getElementById("stream");
 const canvas = document.getElementById("overlay");
@@ -554,6 +590,20 @@ function draw() {
     ctx.lineWidth = 2;
     ctx.stroke();
 
+    zone.points.forEach(([x, y], pointIndex) => {
+      const active = [drag, hover].some(
+        (target) => target && target.zoneIndex === index && target.pointIndex === pointIndex,
+      );
+      ctx.beginPath();
+      ctx.arc(x * w, y * h, active ? HANDLE_ACTIVE_RADIUS : HANDLE_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = active ? "#ffffff" : color;
+      ctx.fill();
+      // A dark ring keeps the dot readable on top of a bright camera image.
+      ctx.strokeStyle = "#0b1220";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+
     const [cx, cy] = centroid(zone.points);
     ctx.fillStyle = color;
     ctx.font = "600 13px system-ui, sans-serif";
@@ -588,12 +638,82 @@ function syncCanvas() {
 new ResizeObserver(syncCanvas).observe(stream);
 window.addEventListener("resize", syncCanvas);
 
-canvas.addEventListener("click", (event) => {
+function clamp01(value) { return Math.min(1, Math.max(0, value)); }
+
+function canvasPoint(event) {
   const rect = canvas.getBoundingClientRect();
-  state.draft.push([
-    (event.clientX - rect.left) / rect.width,
-    (event.clientY - rect.top) / rect.height,
-  ]);
+  return [event.clientX - rect.left, event.clientY - rect.top];
+}
+
+function zoneAt(x, y) {
+  // Hidden zones have no visible handles, so they must not be grabbable either.
+  if (!el("show-zones").checked) return null;
+  const w = canvas.width, h = canvas.height;
+  let found = null;
+  let closest = HIT_RADIUS;
+  zoneEntries().forEach((zone, zoneIndex) => {
+    zone.points.forEach(([px, py], pointIndex) => {
+      const distance = Math.hypot(px * w - x, py * h - y);
+      if (distance <= closest) {
+        closest = distance;
+        found = { zoneIndex: zoneIndex, pointIndex: pointIndex };
+      }
+    });
+  });
+  return found;
+}
+
+function setHover(found) {
+  const same = (!found && !hover) ||
+    (found && hover && found.zoneIndex === hover.zoneIndex && found.pointIndex === hover.pointIndex);
+  if (same) return;
+  hover = found;
+  canvas.style.cursor = found ? "grab" : "crosshair";
+  draw();
+}
+
+function endDrag(event) {
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  if (!drag) return;
+  drag = null;
+  hover = null;
+  canvas.style.cursor = "crosshair";
+  draw();
+  message("已调整顶点，记得点保存。");
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  const [x, y] = canvasPoint(event);
+  const found = zoneAt(x, y);
+  // Recorded so the click that follows a grab does not also drop a draft point.
+  grabbed = Boolean(found);
+  if (!found) return;
+  drag = found;
+  hover = found;
+  canvas.style.cursor = "grabbing";
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
+  message("拖拽顶点调整「" + zoneEntries()[found.zoneIndex].name + "」，松开结束。");
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  const [x, y] = canvasPoint(event);
+  if (!drag) { setHover(zoneAt(x, y)); return; }
+  const zone = zoneEntries()[drag.zoneIndex];
+  if (!zone || !zone.points[drag.pointIndex]) { drag = null; return; }
+  zone.points[drag.pointIndex] = [clamp01(x / canvas.width), clamp01(y / canvas.height)];
+  draw();
+});
+
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+canvas.addEventListener("pointerleave", () => { if (!drag) setHover(null); });
+
+canvas.addEventListener("click", (event) => {
+  if (grabbed) { grabbed = false; return; }
+  const [x, y] = canvasPoint(event);
+  state.draft.push([x / canvas.width, y / canvas.height]);
   draw();
 });
 
@@ -984,6 +1104,11 @@ def _make_handler(context: PreviewContext) -> type[BaseHTTPRequestHandler]:
             )
             self.end_headers()
             last_seen = -1
+            # Counted around the whole (long-lived) response, because this is exactly
+            # what "a browser is watching this camera" means: the app opens the camera's
+            # stream when the first subscriber arrives and closes it after the last one
+            # leaves.
+            context.hub.watch(camera)
             try:
                 while True:
                     feed = context.hub.get(camera)
@@ -1003,6 +1128,8 @@ def _make_handler(context: PreviewContext) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError, OSError):
                 # The browser closed the tab or navigated away.
                 pass
+            finally:
+                context.hub.unwatch(camera)
 
     return Handler
 

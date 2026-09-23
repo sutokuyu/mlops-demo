@@ -126,33 +126,91 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="Publish frames without running the model; useful for a quick look.",
     )
+    parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=15.0,
+        help="How long to keep a camera's stream open after the last browser stops "
+        "watching it, so a reload or a tab switch does not re-dial the camera.",
+    )
     return parser.parse_args(argv)
 
 
-def build_readers(camera_names: list[str]) -> list[tuple[str, StreamReader]]:
-    readers: list[tuple[str, StreamReader]] = []
+def stream_schedule(
+    camera_names: list[str],
+    running: set[str],
+    watched: set[str],
+    idle_since: dict[str, float],
+    now: float,
+    grace_seconds: float,
+) -> tuple[list[str], list[str], dict[str, float]]:
+    """Which camera streams to open and which to release at this moment.
+
+    Open what a browser is watching; release what stopped being watched a grace period
+    ago - long enough that a reload or a tab switch does not drop and re-dial the
+    camera, short enough that an abandoned tab does not hold a session all night.
+
+    Kept pure and separate from the loop, so the rule "the tab you are looking at is
+    the only stream open" can be tested without a camera, a socket or a browser.
+    """
+    idle = dict(idle_since)
+    start: list[str] = []
+    release: list[str] = []
+    for name in camera_names:
+        if name in watched:
+            idle.pop(name, None)
+            if name not in running:
+                start.append(name)
+            continue
+        if name not in running:
+            idle.pop(name, None)
+            continue
+        first_idle = idle.setdefault(name, now)
+        if now - first_idle >= grace_seconds:
+            release.append(name)
+            idle.pop(name, None)
+    return start, release, idle
+
+
+def open_reader(camera_name: str) -> StreamReader | None:
+    """Start one camera's reader, or explain why it cannot be started.
+
+    The URL is resolved here rather than at startup, so the address the tracker last
+    wrote into .env is picked up on the next tab switch instead of needing this
+    process restarted.
+    """
+    try:
+        rtsp_url = camera_rtsp_url(camera_name)
+    except RuntimeError as error:
+        print(f"[{camera_name}] cannot stream: {error}")
+        return None
+    if not rtsp_url:
+        print(f"[{camera_name}] cannot stream: no RTSP URL configured")
+        return None
+    reader = StreamReader(source=rtsp_url, name=camera_name)
+    reader.start()
+    return reader
+
+
+def cameras_with_urls(camera_names: list[str]) -> list[str]:
+    """The cameras this preview can stream, checked without opening any of them."""
+    usable: list[str] = []
     for camera_name in camera_names:
         try:
-            rtsp_url = camera_rtsp_url(camera_name)
-        except RuntimeError as error:
-            print(f"[{camera_name}] skipped: {error}")
-            continue
-        if not rtsp_url:
-            print(f"[{camera_name}] skipped: no RTSP URL configured")
-            continue
-        reader = StreamReader(source=rtsp_url, name=camera_name)
-        reader.start()
-        readers.append((camera_name, reader))
-    return readers
+            if camera_rtsp_url(camera_name):
+                usable.append(camera_name)
+                continue
+        except RuntimeError:
+            pass
+        print(f"[{camera_name}] skipped: no RTSP URL configured")
+    return usable
 
 
 def main(argv=None) -> None:
     args = parse_args(argv)
-    camera_names = args.camera_names or configured_cameras()
+    camera_names = cameras_with_urls(args.camera_names or configured_cameras())
     hub = FrameHub(display_width=args.display_width, quality=args.jpeg_quality)
-
-    readers = build_readers(camera_names)
-    if not readers:
+    if not camera_names:
         print(
             "No camera has an RTSP URL.\n"
             "Export the URLs first, for example:\n"
@@ -161,23 +219,59 @@ def main(argv=None) -> None:
             "  export FEEDER_RTSP_URL='rtsp://...'"
         )
         raise SystemExit(2)
-    for camera_name, _ in readers:
+    for camera_name in camera_names:
         hub.register(camera_name)
+        hub.set_status(camera_name, "idle (not watched)")
 
     context = PreviewContext(hub=hub, settings=alignment_settings())
     server = start_server(context, host=args.host, port=args.port)
     print(f"Preview ready — open http://localhost:{args.port} in your browser")
-    print(f"Serving cameras: {', '.join(name for name, _ in readers)}")
+    print(f"Serving cameras: {', '.join(camera_names)}")
+    print(
+        "Streams are opened on demand: the tab you are looking at is the only camera "
+        f"this process holds open, and it is released {args.idle_seconds:.0f}s after "
+        "the last browser looks away."
+    )
 
     model = None
     if not args.no_detections:
         model = YOLO(str(args.model))
 
     interval = 1.0 / args.fps if args.fps > 0 else 0.0
+    readers: dict[str, StreamReader] = {}
+    idle_since: dict[str, float] = {}
+    # A camera that cannot be opened (no URL, or a name the config does not know) will
+    # not become openable a microsecond later, so a failed attempt is not retried on
+    # every pass of the loop - that would be one log line per frame.
+    retry_after: dict[str, float] = {}
     try:
         while True:
             loop_start = time.monotonic()
-            for camera_name, reader in readers:
+            start, release, idle_since = stream_schedule(
+                camera_names,
+                set(readers),
+                hub.watched(),
+                idle_since,
+                loop_start,
+                args.idle_seconds,
+            )
+            for camera_name in start:
+                if loop_start < retry_after.get(camera_name, 0.0):
+                    continue
+                reader = open_reader(camera_name)
+                if reader is None:
+                    retry_after[camera_name] = loop_start + 30.0
+                    hub.set_status(camera_name, "no stream (check its *_RTSP_URL)")
+                    continue
+                retry_after.pop(camera_name, None)
+                readers[camera_name] = reader
+                print(f"[{camera_name}] opening the stream (a browser is watching)")
+            for camera_name in release:
+                readers.pop(camera_name).close()
+                hub.set_status(camera_name, "idle (not watched)")
+                print(f"[{camera_name}] nobody is watching; released the stream")
+
+            for camera_name, reader in list(readers.items()):
                 frame = reader.get_latest_frame(stale_after_seconds=args.stale_after)
                 if frame is None:
                     hub.set_status(
@@ -207,7 +301,7 @@ def main(argv=None) -> None:
     except KeyboardInterrupt:
         print("\nstopping")
     finally:
-        for _, reader in readers:
+        for reader in readers.values():
             reader.close()
         server.shutdown()
         server.server_close()

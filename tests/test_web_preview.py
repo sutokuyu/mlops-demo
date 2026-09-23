@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.monitoring import web_preview_app
 from src.monitoring.location_zones import load_calibrations
 from src.monitoring.web_preview import (
     INDEX_HTML,
@@ -481,3 +482,110 @@ def test_status_reports_the_best_sub_threshold_confidence(server) -> None:
     camera = status_payload(context)["cameras"][0]
     assert camera["detections"] == 0
     assert camera["best_confidence"] == pytest.approx(0.31)
+
+
+# --- one stream open at a time ----------------------------------------------------
+#
+# Every open camera costs a session and a slice of the Wi-Fi relay this machine already
+# records all three cameras through. The browser only ever looks at one tab, so the
+# preview only ever holds one camera open - and gives it up when the browser moves on.
+
+
+def test_the_hub_counts_the_browsers_watching_a_camera() -> None:
+    hub = FrameHub()
+    hub.register("sofa")
+    hub.register("feeder")
+
+    assert hub.watched() == set()
+    hub.watch("sofa")
+    assert hub.watched() == {"sofa"}
+    hub.watch("sofa")
+    assert hub.watched() == {"sofa"}, "two tabs on one camera are still one camera"
+    hub.watch("feeder")
+    assert hub.watched() == {"sofa", "feeder"}
+
+    hub.unwatch("sofa")
+    assert hub.watched() == {"sofa", "feeder"}, "one of the two tabs is still watching"
+    hub.unwatch("sofa")
+    assert hub.watched() == {"feeder"}
+
+
+def test_unwatching_more_than_watched_does_not_go_negative() -> None:
+    """A dropped connection must not make a camera look unwatched forever."""
+    hub = FrameHub()
+    hub.register("sofa")
+    hub.unwatch("sofa")
+    hub.watch("sofa")
+    assert hub.watched() == {"sofa"}
+
+
+def test_watching_an_unknown_camera_is_ignored() -> None:
+    hub = FrameHub()
+    hub.watch("nowhere")
+    assert hub.watched() == set()
+
+
+def test_a_watched_camera_is_opened_and_an_unwatched_one_is_left_alone() -> None:
+    start, release, idle = web_preview_app.stream_schedule(
+        ["living_room", "sofa", "feeder"],
+        running=set(),
+        watched={"sofa"},
+        idle_since={},
+        now=100.0,
+        grace_seconds=15.0,
+    )
+    assert start == ["sofa"], "only the tab being looked at gets a stream"
+    assert release == []
+    assert idle == {}
+
+
+def test_a_camera_keeps_its_stream_through_a_reload() -> None:
+    """The grace period is what stops a refresh from dropping and re-dialling the camera."""
+    start, release, idle = web_preview_app.stream_schedule(
+        ["sofa"],
+        running={"sofa"},
+        watched=set(),
+        idle_since={},
+        now=100.0,
+        grace_seconds=15.0,
+    )
+    assert (start, release) == ([], []), "nobody is watching yet, but the grace has not run out"
+    assert idle == {"sofa": 100.0}
+
+    start, release, idle = web_preview_app.stream_schedule(
+        ["sofa"], running={"sofa"}, watched=set(), idle_since=idle, now=110.0, grace_seconds=15.0
+    )
+    assert release == [], "still inside the grace"
+    assert idle == {"sofa": 100.0}, "and the clock is not restarted by the retry"
+
+    start, release, idle = web_preview_app.stream_schedule(
+        ["sofa"], running={"sofa"}, watched=set(), idle_since=idle, now=116.0, grace_seconds=15.0
+    )
+    assert release == ["sofa"], "past it, the session goes back"
+    assert idle == {}
+
+
+def test_looking_at_a_camera_again_cancels_the_release() -> None:
+    start, release, idle = web_preview_app.stream_schedule(
+        ["sofa"],
+        running={"sofa"},
+        watched={"sofa"},
+        idle_since={"sofa": 100.0},
+        now=110.0,
+        grace_seconds=15.0,
+    )
+    assert (start, release) == ([], [])
+    assert idle == {}, "the countdown is forgotten, not merely paused"
+
+
+def test_a_camera_that_is_not_running_is_never_released() -> None:
+    start, release, idle = web_preview_app.stream_schedule(
+        ["sofa", "feeder"],
+        running=set(),
+        watched=set(),
+        idle_since={"sofa": 0.0},
+        now=9999.0,
+        grace_seconds=15.0,
+    )
+    assert (start, release) == ([], []), "there is nothing to close"
+    assert idle == {}, "and no stale countdown is kept for a camera that is not open"
