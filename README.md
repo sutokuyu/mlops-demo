@@ -107,6 +107,10 @@ and friends, so an unset variable becomes an empty string rather than an error.
 `scripts/run_tracker.sh` therefore checks every configured camera before starting
 and fails with the names of the ones that are missing.
 
+The **host** part of those URLs is maintained automatically - see
+[When a camera changes address](#when-a-camera-changes-address). Only the address
+is ever rewritten; the credentials, port and stream path stay as you typed them.
+
 ## Usage
 
 ### 1. Collect candidate frames
@@ -212,6 +216,61 @@ detection. When alignment quality is too poor, the sample is stored with
 The database uses WAL and commits every write, so the report can read it while
 the tracker is running.
 
+#### When a camera changes address
+
+The cameras hang behind a Wi-Fi relay that hands them a new address every so
+often, and a stale `*_RTSP_URL` is invisible until a camera quietly stops being
+recorded. Two things keep that from needing a human.
+
+**The tracker relocates itself.** Once a camera has been unreachable for
+`discovery.missing_after_seconds`, it sweeps the subnet in a background thread
+and adopts the address it finds, without a restart. The owner gets exactly one
+Discord message per outage either way: one when the camera cannot be found, and
+one when it answers again. That second message is what re-arms the alert, so a
+camera that flaps all night is news twice, not news every five minutes.
+
+**`.env` is kept correct** for everything else that reads it - `run_tracker.sh`,
+`realtime_view`, the browser preview:
+
+```bash
+scripts/sync_camera_ips.py               # report only, change nothing
+scripts/sync_camera_ips.py --apply       # rewrite .env, keeping .env.bak
+scripts/sync_camera_ips.py --explain     # what every reachable address answered
+```
+
+`cat-camera-ip.timer` runs the `--apply` form every five minutes, and
+`run_tracker.sh` runs it once before starting. It exits `2` when a camera is still
+missing, which is a warning about the camera rather than a failure of the job.
+
+While the tracker is recording, that lookup **stands down** (and a lock keeps two
+of them from running at once). An address is identified by opening a stream on the
+camera, which competes with the recording for the same relay link - measured: two
+lookups alongside the tracker stalled a 2560x1440 handshake past 30 seconds and the
+tracker dropped its stream on another camera. In that state the tracker maintains
+`.env` itself, and `--force` looks anyway for a diagnosis done on purpose.
+
+**How a camera is identified - and why it is not by MAC.** The relay rewrites the
+source MAC, so every device behind it answers ARP with the same hardware address
+(measured on this network: twelve addresses in `192.168.3.0/24`, all three cameras
+among them, one MAC). A MAC table therefore only says "this device is behind the
+relay", and a DHCP reservation on the router cannot separate them either - the
+router sees that same one address. So each candidate address is asked the one
+question only a camera can answer:
+
+1. **Its password.** Every camera has its own; the others are refused with 401.
+2. **Its picture.** One frame, matched with the same ORB matcher the zones use,
+   against the reference frame those zones were drawn on.
+
+Both have to agree. A picture that clearly belongs to a *different* camera vetoes
+the credentials instead of confirming them, because a wrong address is worse than
+an offline camera: offline loses samples, a mixed-up camera files one room's cat
+under another room's zones. When the evidence cannot separate two addresses the
+camera is left alone and the ambiguity is reported.
+
+`--explain` prints the evidence for every address, which is what makes "not
+found" actionable: it names the addresses that speak RTSP but refuse this
+camera's password, and the ones that answer an SDK port but no RTSP at all.
+
 ### 8. Daily report
 
 ```bash
@@ -288,9 +347,10 @@ quotes the question back, so answering a bot would loop).
 
 ### 10. Run it 24/7
 
-`deploy/systemd/` holds three units: `cat-tracker.service` runs the recorder with
-`Restart=always`, `cat-report.timer` fires `cat-report.service` at midnight, and
-`cat-discord.service` keeps the bot connected.
+`deploy/systemd/` holds five units: `cat-tracker.service` runs the recorder with
+`Restart=always`, `cat-report.timer` fires `cat-report.service` at midnight,
+`cat-discord.service` keeps the bot connected, and `cat-camera-ip.timer` re-finds
+the cameras and refreshes their addresses in `.env`.
 
 ```bash
 scripts/install_services.sh              # symlink, enable, enable-linger, start
@@ -303,6 +363,7 @@ journalctl --user -u cat-tracker -f
 systemctl --user list-timers cat-report.timer
 systemctl --user start cat-report.service      # send one now, to test
 journalctl --user -u cat-discord -f            # live bot log
+systemctl --user list-timers cat-camera-ip.timer
 ```
 
 `install_services.sh` preflights each unit before starting it, so a missing
@@ -338,6 +399,7 @@ After editing a unit file, `systemctl --user daemon-reload` then restart. Editin
 | Key | Meaning |
 | --- | --- |
 | `cameras` | Which cameras to sample; names must exist in `config.yaml` |
+| `discovery` | Where to look for a camera that moved: subnets, ports, scan timing, how long to wait before searching and how often to retry |
 | `preview` | Browser UI host, port, resolution and JPEG quality |
 | `tracking` | Sample interval, confidence, `imgsz`, switch hysteresis, timeouts, database |
 | `alignment` | ORB matching thresholds and the trust-last-good window |
@@ -376,8 +438,13 @@ and handed to the model as an already-decided `events` array.
 ```
 
 `tests/` covers alignment, zone lookup, tracking, the web UI's embedded
-JavaScript, the report's prompt assembly and delivery, and the Discord bot's
-decision rules (which messages to answer, which day they mean, what to reply).
+JavaScript, the report's prompt assembly and delivery, camera discovery, and the
+Discord bot's decision rules (which messages to answer, which day they mean, what
+to reply).
+Nothing in `tests/test_camera_discovery.py` touches a network or a camera: the
+scan, the stream open and the picture match are injected, so the rules that cost
+real debugging - which signal decides identity, and what to do when the evidence
+disagrees - are tested without one.
 The bot tests run without a token or a connection: everything above `run()` in
 `discord_bot.py` is free of any `discord` import on purpose. The two JavaScript
 guards are worth knowing about: one checks per-line quote balance (a raw newline

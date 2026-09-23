@@ -1,0 +1,16 @@
+[Unit]
+Description=Re-locate the cat cameras and fix their addresses in .env
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/mlops-demo
+# The script loads .env itself: systemd starts a unit with almost no environment, and
+# the camera URLs (and the passwords used to identify a camera) live there.
+ExecStart=%h/projects/mlops-demo/.venv/bin/python %h/projects/mlops-demo/scripts/sync_camera_ips.py --apply
+# Exit 2 means "written what I found, but a camera is still missing". That is a
+# warning about the camera, not a failure of this job, and the tracker reports it to
+# Discord on its own - so do not leave a red unit behind for a camera that is simply
+# unplugged.
+SuccessExitStatus=2
+Nice=10
