@@ -177,6 +177,12 @@ python src/execute_web_preview.py
 # then open http://localhost:8765
 ```
 
+Every configured camera is listed as a tab, but **only the tab being looked at gets a
+stream**: the camera is opened when a browser subscribes to its MJPEG and released
+`--idle-seconds` (default 15) after the last one looks away. The tracker already
+records all of them through one Wi-Fi relay, and a preview that quietly held a session
+per camera competes with that recording for the same link.
+
 The canvas draws polygons in the camera's reference frame and saves them to
 `configs/zones.yaml` via `POST /api/zones/<camera>`. Each detection is drawn with
 a crosshair on its bottom-centre anchor, which is the point zone lookup uses, so

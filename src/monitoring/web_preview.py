@@ -86,6 +86,11 @@ class CameraFeed:
     frame_count: int = 0
     detections: int = 0
     best_confidence: float = 0.0
+    # How many browsers are subscribed to this camera's MJPEG right now. The app uses
+    # it to decide which cameras are worth holding an RTSP session open for: this
+    # machine already records all of them through one Wi-Fi relay, and a preview that
+    # quietly adds a session per camera competes with the recording for that link.
+    watchers: int = 0
 
     @property
     def age_seconds(self) -> float | None:
@@ -108,6 +113,25 @@ class FrameHub:
     def names(self) -> list[str]:
         with self.lock:
             return list(self.feeds)
+
+    def watch(self, name: str) -> None:
+        """Record that a browser has subscribed to this camera's stream."""
+        with self.lock:
+            feed = self.feeds.get(name)
+            if feed is not None:
+                feed.watchers += 1
+
+    def unwatch(self, name: str) -> None:
+        """A subscriber went away - the tab was closed, or switched to another camera."""
+        with self.lock:
+            feed = self.feeds.get(name)
+            if feed is not None:
+                feed.watchers = max(0, feed.watchers - 1)
+
+    def watched(self) -> set[str]:
+        """Cameras with at least one live subscriber, i.e. the tab being looked at."""
+        with self.lock:
+            return {name for name, feed in self.feeds.items() if feed.watchers > 0}
 
     def get(self, name: str) -> CameraFeed | None:
         """Return a shallow copy so readers never observe a half-written feed."""
@@ -1080,6 +1104,11 @@ def _make_handler(context: PreviewContext) -> type[BaseHTTPRequestHandler]:
             )
             self.end_headers()
             last_seen = -1
+            # Counted around the whole (long-lived) response, because this is exactly
+            # what "a browser is watching this camera" means: the app opens the camera's
+            # stream when the first subscriber arrives and closes it after the last one
+            # leaves.
+            context.hub.watch(camera)
             try:
                 while True:
                     feed = context.hub.get(camera)
@@ -1099,6 +1128,8 @@ def _make_handler(context: PreviewContext) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError, OSError):
                 # The browser closed the tab or navigated away.
                 pass
+            finally:
+                context.hub.unwatch(camera)
 
     return Handler
 
