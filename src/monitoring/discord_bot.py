@@ -34,7 +34,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.config_loader import resolve_config_path
+from src.config_loader import load_env_file, resolve_config_path
+
+# Before the monitoring imports below: they read the config, and the config substitutes
+# ${VAR} from the environment at import time - the bot token among them.
+load_env_file()
+
 from src.monitoring.location_config import DISCORD_BOT_CONFIG, REPORT_CONFIG
 from src.monitoring.location_report import (
     DISCORD_MESSAGE_LIMIT,

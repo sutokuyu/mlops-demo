@@ -12,6 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config_loader import load_env_file
+
+# Before the monitoring imports below: they read the config, and the config substitutes
+# ${VAR} from the environment at import time.
+load_env_file()
+
 from src.monitoring.location_store import LocationStore
 
 TZ = ZoneInfo("Asia/Tokyo")

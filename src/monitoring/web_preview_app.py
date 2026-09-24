@@ -28,6 +28,12 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config_loader import load_env_file
+
+# Before the monitoring imports below: they read the config, and the config substitutes
+# ${VAR} from the environment at import time.
+load_env_file()
+
 from src.monitoring.detections import bottom_center, boxes_from_result, select_best_per_class
 from src.monitoring.location_config import (
     DEFAULT_IDENTITY_MODEL,

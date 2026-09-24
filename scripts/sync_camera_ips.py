@@ -32,7 +32,6 @@ Exit codes:
 
 import argparse
 import fcntl
-import os
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -44,29 +43,16 @@ DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 LOCK_PATH = PROJECT_ROOT / "data" / "camera-lookup.lock"
 TRACKER_UNIT = "cat-tracker.service"
 
+# .env at module level, before anything can read the config: the config substitutes
+# ${VAR} from the environment at import time, so loading it inside main() would be too
+# late for the imports main() itself does. config_loader is light (no numpy or cv2), so
+# importing it here does not slow --help down; camera_discovery stays inside main().
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-def load_env_file(path: Path) -> bool:
-    """Put .env into os.environ before anything reads the configuration.
+from src.config_loader import load_env_file
 
-    ``config_loader`` substitutes ``${VARS}`` from ``os.environ`` and
-    ``location_config`` freezes the substituted config at import time, so this has to
-    happen before those imports - which is why they sit inside ``main``. Same reason
-    ``scripts/run_tracker.sh`` sources .env: systemd starts a unit with almost no
-    environment, so a script that only worked in an interactive shell would work
-    everywhere except where it matters.
-
-    .env wins over the surrounding environment: it is the documented single source of
-    truth for the camera URLs.
-    """
-    if not path.is_file():
-        return False
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        os.environ[key.strip()] = value.strip().strip("'").strip('"')
-    return True
+load_env_file()
 
 
 def tracker_is_running(unit: str = TRACKER_UNIT) -> bool:
@@ -154,6 +140,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None) -> int:
     args = parse_args(argv)
     env_path = args.env if args.env.is_absolute() else PROJECT_ROOT / args.env
+    # Already loaded at import time when it is the default file; this call is what makes
+    # --env work, and it is a no-op for the default path.
     if not load_env_file(env_path):
         print(f"error: {env_path} does not exist", file=sys.stderr)
         return 1

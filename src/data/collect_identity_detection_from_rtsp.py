@@ -26,7 +26,11 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, resolve_config_path
+from src.config_loader import load_config, load_env_file, resolve_config_path
+
+# Before anything that reads the config: it substitutes ${VAR} from the environment at
+# import time, and the camera URLs are the whole point of this script.
+load_env_file()
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 COLLECTION_CONFIG = CONFIG["identity_collection"]

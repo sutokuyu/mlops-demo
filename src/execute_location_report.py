@@ -14,6 +14,12 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config_loader import load_env_file
+
+# Before the import below: it reads the config, and the config substitutes ${VAR} from
+# the environment at import time.
+load_env_file()
+
 from src.monitoring.location_report import main
 
 if __name__ == "__main__":

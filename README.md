@@ -107,6 +107,20 @@ and friends, so an unset variable becomes an empty string rather than an error.
 `scripts/run_tracker.sh` therefore checks every configured camera before starting
 and fails with the names of the ones that are missing.
 
+**Every runnable entry point reads this file itself**, before it imports anything that
+reads the config - so `python src/execute_web_preview.py` works in a fresh terminal
+with nothing exported. This is not a convenience: the config substitutes `${VAR}` at
+*import* time, so a value loaded later never reaches the camera URLs, and a shell that
+exported them days ago would otherwise keep a stale address winning over the file the
+tracker keeps correcting.
+
+`.env` therefore wins over the surrounding environment. To override it deliberately for
+one run, point `MLOPS_ENV_FILE` at another file:
+
+```bash
+MLOPS_ENV_FILE=/tmp/fake.env python src/execute_web_preview.py
+```
+
 The **host** part of those URLs is maintained automatically - see
 [When a camera changes address](#when-a-camera-changes-address). Only the address
 is ever rewritten; the credentials, port and stream path stay as you typed them.
