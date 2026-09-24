@@ -223,6 +223,22 @@ This writes a **new** `calibration_id` (with the reference frame and an overlay
 image) rather than overwriting the old one, and posts the result to Discord for
 confirmation.
 
+The tracker re-anchors on its own when a drift is detected, which is controlled by
+`alignment.reanchor_mode`:
+
+| mode | what a detected drift does |
+| --- | --- |
+| `apply` | projects the zones onto a fresh frame and adopts it as the new reference (default) |
+| `alert` | sends one LLM-worded warning and leaves the zones exactly as drawn |
+
+This machine runs `alert`. A projection is only as good as the transform behind
+it, and a bad one fails quietly: an automatic re-anchor whose transform reported
+`scale=0.000` stored all eight of feeder's hand-drawn zones as a single point at
+`(0, 0)`. The drift is still detected the same way (`alignment.reanchor_trigger`
+and its thresholds), so the warning still arrives - the repair is just left to a
+human. The mode gates the **automatic** path only: `execute_recalibrate.py` and
+the editor's 重锚定 button keep re-anchoring whenever you ask them to.
+
 ### 7. Run the tracker
 
 ```bash

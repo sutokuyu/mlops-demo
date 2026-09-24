@@ -143,6 +143,16 @@ alignment:
   reanchor_min_rotation_deg: 1.0
   reanchor_min_scale_delta: 0.02
   reanchor_min_interval_seconds: 600.0
+  # 检测出漂移之后做什么：
+  #   apply - 自动重锚：把区域按投影挪到新画面上，并把新画面当成参考帧（旧行为，
+  #           也是代码里的默认值，别人的配置不写这个键就还是这个）。
+  #   alert - 只提醒，不碰区域。区域永远是你手动画、手动保存的那一份。
+  # 本机用 alert。理由有两条，都是从实际结果里来的：
+  #   1. 投影精度不够，挪完还是要人肉校对，等于没省事；
+  #   2. 投影塌掉的时候会静默地毁掉数据 —— 真的发生过一次：变换报 scale=0.000，
+  #      feeder 的 8 个区域全被写成 (0,0) 一个点，只能重画。
+  # 检测逻辑（reanchor_trigger 和下面三个阈值）照旧，所以歪了还是会收到提醒。
+  reanchor_mode: alert
   # Send the projected-zone overlay to Discord so a bad projection is visible.
   notify_on_reanchor: true
 

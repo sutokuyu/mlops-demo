@@ -160,6 +160,33 @@ def describe_reason(reason: str) -> str:
     return reason
 
 
+# The drift sentences ``location_tracker.reanchor_reason`` builds. Each one names a
+# different piece of evidence, and only the last carries a magnitude, so the numbers
+# are the part worth preserving through the gloss.
+DRIFT_REASONS = (
+    (r"(\d+) consecutive failed matches", r"有连续 \1 次画面跟参考帧完全对不上"),
+    (r"(\d+) consecutive samples below the good tier", r"有连续 \1 次匹配质量偏低"),
+    (
+        r"the transform has stayed large for (\d+) samples "
+        r"\(shift ([\d.]+), rotation ([\d.-]+)deg, scale ([\d.]+)\)",
+        r"连续 \1 次画面相对参考帧偏得很大（平移 \2、旋转 \3 度、缩放 \4）",
+    ),
+)
+
+
+def describe_drift(reason: str) -> str:
+    """Chinese gloss for ``reanchor_reason``'s own sentences.
+
+    Same job as ``describe_reason``: the machine sentence stays in the console log
+    while the owner and the LLM get something readable. The numbers are carried over
+    unchanged, because the alert voice is told not to invent any of its own.
+    """
+    for pattern, gloss in DRIFT_REASONS:
+        if re.fullmatch(pattern, reason):
+            return re.sub(pattern, gloss, reason)
+    return reason
+
+
 def _alert_content(event: str, settings: dict, facts: dict, fallback: str) -> str:
     """Phrase an alert, but only when it is actually going to be sent.
 
@@ -359,6 +386,41 @@ def reanchor(
     return ReanchorOutcome(
         True, updated, f"{mode}; {note}", overlay_path, transform_note, off_frame
     )
+
+
+def announce_drift(calibration: Calibration, settings: dict, reason: str, notify=None) -> str:
+    """Report that the camera drifted, and leave the zones alone.
+
+    This is the whole of alert-only mode, and it exists because a wrong automatic
+    repair is worse than no repair. Projecting the zones onto a new frame is only as
+    trustworthy as the transform behind it, and when that transform goes bad it does
+    not fail loudly - it writes nonsense into every polygon. Measured once for real:
+    a collapsed match reported ``scale=0.000`` and stored all eight of feeder's
+    hand-drawn zones as a single point at (0, 0). Detecting the drift loses nothing,
+    so the detection is kept and the repair waits for the owner.
+    """
+    notify = notify or _notify
+    readable = describe_drift(reason)
+    plain = (
+        f"\u26a0\ufe0f `{calibration.camera}` 的画面跟参考帧对不上了，可能是被碰歪了。\n"
+        f"依据：{readable}\n"
+        "区域没有被动过，还是上次手动保存的那一份。\n"
+        "看一眼画面：区域确实歪了，就在标注页面重画一次。"
+    )
+    content = _alert_content(
+        "reanchor_drift",
+        settings,
+        {
+            "摄像头": calibration.camera,
+            "发生了什么": "画面跟参考帧对不上了，可能是摄像头被碰歪了",
+            "对不上的程度": readable,
+            "区域有没有被自动改动": "没有。自动重锚已经关掉，区域还是上次手动保存的那一份",
+            "需要主人做什么": "看一眼画面；区域确实歪了就重新画一次，没歪就不用管",
+        },
+        plain,
+    )
+    _, note = notify(settings, calibration.camera, content, None)
+    return note
 
 
 def wait_for_frame(reader, timeout_seconds: float):

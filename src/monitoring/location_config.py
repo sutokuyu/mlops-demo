@@ -42,6 +42,15 @@ DEFAULT_IDENTITY_MODEL = resolve_config_path(CONFIG["models"]["identity_detectio
 # re-anchor can actually succeed. See location_tracker.reanchor_reason().
 REANCHOR_TRIGGERS = ("displacement", "degraded", "failures")
 
+# What to do once a drift has been detected. ``apply`` projects the zones onto the
+# new frame and adopts that frame as the reference; ``alert`` reports the drift and
+# leaves the zones exactly as they were drawn. The default stays ``apply`` so an
+# existing locations.yaml keeps behaving the way it did; this machine sets ``alert``.
+REANCHOR_APPLY = "apply"
+REANCHOR_ALERT = "alert"
+REANCHOR_MODES = (REANCHOR_APPLY, REANCHOR_ALERT)
+DEFAULT_REANCHOR_MODE = REANCHOR_APPLY
+
 
 def configured_cameras() -> list[str]:
     return list(LOCATION_CONFIG["cameras"])
@@ -62,13 +71,21 @@ def alert_webhook() -> str:
 
 
 def alignment_settings() -> dict:
-    """Everything the alignment and re-anchor code paths need, in one place."""
+    """Everything the alignment and re-anchor code paths need, in one place.
+
+    Both enum-shaped keys are validated here, at startup, because their defaults pull
+    in opposite directions: an unknown trigger quietly disables every re-anchor, and
+    an unknown mode quietly keeps rewriting the zones that were drawn by hand.
+    """
     directory = CALIBRATION_CONFIG.get("directory", "data/calibrations")
     trigger = ALIGNMENT_CONFIG.get("reanchor_trigger", "displacement")
     if trigger not in REANCHOR_TRIGGERS:
         raise ValueError(
             f"alignment.reanchor_trigger must be one of {REANCHOR_TRIGGERS}, got {trigger!r}"
         )
+    mode = ALIGNMENT_CONFIG.get("reanchor_mode", DEFAULT_REANCHOR_MODE)
+    if mode not in REANCHOR_MODES:
+        raise ValueError(f"alignment.reanchor_mode must be one of {REANCHOR_MODES}, got {mode!r}")
     return {
         "work_width": ALIGNMENT_CONFIG.get("work_width", 640),
         "min_inliers": ALIGNMENT_CONFIG.get("min_inliers", 15),

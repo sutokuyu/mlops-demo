@@ -269,6 +269,45 @@ def calibrated_camera(tmp_path, settings, zones, reference_frame):
     return calibration
 
 
+def test_alert_only_drift_reports_say_that_the_zones_were_left_alone(
+    reanchor_settings, monkeypatch
+) -> None:
+    """The owner has to be told the zones are untouched, or they go looking for a repair."""
+    sent: list[tuple] = []
+
+    def capture(settings, camera, content, attachment):
+        sent.append((camera, content, attachment))
+        return True, "sent"
+
+    monkeypatch.setattr(recalibration, "_notify", capture)
+    bowl = Zone("bowl", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])
+    calibration = Calibration(camera="feeder", zones=[bowl])
+
+    note = recalibration.announce_drift(
+        calibration,
+        reanchor_settings,
+        "the transform has stayed large for 3 samples (shift 0.362, rotation 0.00deg, scale 1.000)",
+    )
+
+    assert note == "sent"
+    camera, content, attachment = sent[0]
+    assert camera == "feeder"
+    assert attachment is None, "a drift warning has no new calibration to show"
+    assert "feeder" in content, "the message has to say which camera"
+    assert "没有被动过" in content, "and that its zones were not rewritten"
+    assert "0.362" in content, "the magnitude the trigger fired on reaches the owner"
+
+
+def test_the_drift_reason_is_glossed_with_its_numbers_intact() -> None:
+    """The LLM is told not to invent numbers, so the numbers must arrive in facts."""
+    glossed = recalibration.describe_drift(
+        "the transform has stayed large for 3 samples (shift 0.362, rotation 0.00deg, scale 1.000)"
+    )
+    assert "3 次" in glossed and "0.362" in glossed
+    assert "99" in recalibration.describe_drift("99 consecutive failed matches")
+    assert "nobody planned for this" == recalibration.describe_drift("nobody planned for this")
+
+
 def test_reanchor_projects_zones_and_writes_a_new_calibration(reanchor_settings) -> None:
     zones = [Zone("sofa", [(0.2, 0.6), (0.5, 0.6), (0.5, 0.95), (0.2, 0.95)])]
     reference_frame = make_texture()

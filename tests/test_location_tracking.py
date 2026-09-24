@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.monitoring import location_report, location_tracker
+from src.monitoring import location_config, location_report, location_tracker
 from src.monitoring.alignment import AlignmentTracker
 from src.monitoring.camera_discovery import (
     DiscoveredCamera,
@@ -157,6 +157,85 @@ def test_reanchor_failures_are_reported_once_until_a_success(trigger_config, mon
     tracker.alignment.displacement_streak = 3
     location_tracker.maybe_reanchor(tracker, 20000.0, settings)
     assert asked_to_notify_on_failure[-1] is True, "so the next failure is news again"
+
+
+def test_the_reanchor_mode_defaults_to_applying_the_repair(trigger_config) -> None:
+    """A config with no mode key keeps the old behaviour, so nothing changes quietly."""
+    assert location_tracker.reanchor_mode() == "apply"
+
+
+def test_alert_mode_reports_a_drift_without_touching_the_zones(trigger_config, monkeypatch) -> None:
+    """Alert mode exists because a bad projection destroys hand-drawn work.
+
+    Measured once for real: a collapsed match reporting ``scale=0.000`` rewrote all
+    eight of feeder's zones as a single point at (0, 0), and every polygon had to be
+    redrawn by hand. Reporting the drift loses none of the evidence and leaves the
+    repair to the owner.
+    """
+    trigger_config["reanchor_mode"] = "alert"
+    tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
+    tracker.alignment.last_magnitude = (0.081, 2.4, 0.011)
+    tracker.reader = FakeReader(object())
+    drawn = list(tracker.calibration.zones)
+    reported: list[str] = []
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("alert mode must not re-anchor")
+
+    monkeypatch.setattr(location_tracker, "reanchor", must_not_run)
+    monkeypatch.setattr(
+        location_tracker,
+        "announce_drift",
+        lambda calibration, settings, reason: reported.append(reason) or "sent",
+    )
+
+    location_tracker.maybe_reanchor(tracker, 1000.0, {"work_width": 640})
+
+    assert len(reported) == 1, "the drift is news, so it is reported"
+    assert "shift 0.081" in reported[0], "with the magnitude that produced it"
+    assert tracker.calibration.zones == drawn, "the drawing is the one that was drawn"
+
+
+def test_a_drift_is_reported_once_until_the_camera_lines_up_again(
+    trigger_config, monkeypatch
+) -> None:
+    """One message per drift, not one per sampling interval.
+
+    A camera left where it is would otherwise repeat itself every few seconds, and a
+    warning that repeats stops being read. What re-arms it is the drift going away.
+    """
+    trigger_config["reanchor_mode"] = "alert"
+    tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
+    tracker.reader = FakeReader(object())
+    reported: list[str] = []
+    monkeypatch.setattr(location_tracker, "reanchor", lambda *args, **kwargs: pytest.fail())
+    monkeypatch.setattr(
+        location_tracker,
+        "announce_drift",
+        lambda calibration, settings, reason: reported.append(reason) or "sent",
+    )
+    settings = {"work_width": 640}
+
+    location_tracker.maybe_reanchor(tracker, 1000.0, settings)
+    # Well past the re-anchor cooldown, and still quiet: the flag suppresses this,
+    # not the clock.
+    location_tracker.maybe_reanchor(tracker, 9000.0, settings)
+    assert len(reported) == 1
+
+    tracker.alignment.displacement_streak = 0
+    location_tracker.maybe_reanchor(tracker, 17000.0, settings)
+
+    tracker.alignment.displacement_streak = 3
+    location_tracker.maybe_reanchor(tracker, 18000.0, settings)
+    assert len(reported) == 2, "the next drift is news again"
+
+
+def test_an_unknown_reanchor_mode_is_rejected_before_the_tracker_starts(monkeypatch) -> None:
+    """A typo must not quietly pick a side: one of these modes rewrites your zones."""
+    monkeypatch.setattr(location_config, "ALIGNMENT_CONFIG", {"reanchor_mode": "notice"})
+
+    with pytest.raises(ValueError, match="reanchor_mode"):
+        location_config.alignment_settings()
 
 
 def test_zone_area_is_used_for_specificity() -> None:

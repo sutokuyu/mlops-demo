@@ -51,9 +51,11 @@ from src.monitoring.detections import (
 from src.monitoring.location_config import (
     ALIGNMENT_CONFIG,
     DEFAULT_IDENTITY_MODEL,
+    DEFAULT_REANCHOR_MODE,
     IDENTITY_CLASSES,
     LOCATION_CONFIG,
     PROJECT_ROOT,
+    REANCHOR_ALERT,
     TRACKING_CONFIG,
     alignment_settings,
     camera_rtsp_url,
@@ -67,7 +69,7 @@ from src.monitoring.location_zones import (
     load_calibrations,
     vote_zone,
 )
-from src.monitoring.recalibration import reanchor, reference_features_for
+from src.monitoring.recalibration import announce_drift, reanchor, reference_features_for
 from src.monitoring.rtsp_stream import StreamReader
 
 EXPECTED_CLASSES = IDENTITY_CLASSES
@@ -118,6 +120,9 @@ class CameraTracker:
     # Set after a failed re-anchor so the same failure is reported only once. A
     # successful re-anchor clears it and re-arms the alert.
     reanchor_failure_reported: bool = False
+    # One message per drift while re-anchoring only reports. Cleared as soon as the
+    # camera lines up with its reference frame again, which is what re-arms it.
+    drift_reported: bool = False
     # Monotonic timestamp of the first failed sample of a run, 0 while the camera is
     # answering. The clock is monotonic so a system clock jump cannot fake an outage.
     unreachable_since: float = 0.0
@@ -460,10 +465,41 @@ def reanchor_reason(tracker: CameraTracker) -> str | None:
     return None
 
 
+def reanchor_mode() -> str:
+    """``apply`` re-anchors a drifted camera; ``alert`` only reports the drift.
+
+    Read from the config rather than decided here, because which one is right depends
+    on how much the projection can be trusted in that room. On these cameras it was
+    the repair, not the drift, that cost the most work.
+    """
+    return ALIGNMENT_CONFIG.get("reanchor_mode", DEFAULT_REANCHOR_MODE)
+
+
+def report_drift(tracker: CameraTracker, settings: dict, reason: str) -> None:
+    """Warn that a camera drifted, once, and change nothing else.
+
+    The flag is set before sending, so a webhook that is briefly unreachable cannot
+    turn one drift into a message per sampling interval. ``reanchor_reason`` falling
+    quiet is what re-arms it, which means the owner hears about the next drift too.
+    """
+    if tracker.drift_reported:
+        return
+    tracker.drift_reported = True
+    note = announce_drift(tracker.calibration, settings, reason)
+    print(f"[{tracker.name}] drift reported: {reason}; {note}")
+
+
 def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
-    """Re-anchor a drifted camera, then report the projected zones to Discord."""
+    """Re-anchor a drifted camera, or - in alert mode - just say that it drifted."""
     reason = reanchor_reason(tracker)
     if reason is None:
+        # The camera lines up with its reference frame again, so the next drift is
+        # news again. Re-armed by that, rather than by a timer: the drift going away
+        # is the only thing that makes a fresh warning worth reading.
+        tracker.drift_reported = False
+        return
+    if reanchor_mode() == REANCHOR_ALERT:
+        report_drift(tracker, settings, reason)
         return
     cooldown = ALIGNMENT_CONFIG.get("reanchor_min_interval_seconds", 600)
     if now - tracker.last_reanchor_at < cooldown:
@@ -729,6 +765,13 @@ def run(args) -> None:
         tracker.reader.start()
 
     print(f"Recording locations to {database}. Press Ctrl+C to stop.")
+    if reanchor_mode() == REANCHOR_ALERT:
+        print(
+            "Automatic re-anchoring is off (alignment.reanchor_mode = alert): a camera"
+            " that drifts is reported to Discord once, and its zones are left as drawn."
+        )
+    else:
+        print("Automatic re-anchoring is on (alignment.reanchor_mode = apply).")
     if discovery.enabled:
         print(
             "Camera discovery is on: a camera that stays unreachable for "
