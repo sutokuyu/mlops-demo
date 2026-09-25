@@ -153,6 +153,15 @@ alignment:
   #      feeder 的 8 个区域全被写成 (0,0) 一个点，只能重画。
   # 检测逻辑（reanchor_trigger 和下面三个阈值）照旧，所以歪了还是会收到提醒。
   reanchor_mode: alert
+  # 提醒去抖：一次漂移只发一条。漂移消失之后，必须连续这么久都真的对上，才
+  # 允许发下一条。
+  # 为什么不按「上一个样本对上了」清标志：夜间 IR 画面会让匹配在两个状态之间
+  # 跳 —— 3 个样本偏大、1 个样本对上、再 3 个偏大 —— 那个「对上」的样本会把
+  # 标志清掉，30 秒后又重新触发。9/26 凌晨 01:09~01:47，sofa 发了 32 条，说的
+  # 都是同一次漂移（rotation 1.0~2.2 度，刚好越过下面 1.0 度的阈值）。
+  # 样本间隔 5 秒，600 秒 = 连续 120 个样本都正常，闪烁期凑不出这么长；相机真
+  # 被摆回来的话，10 分钟后下一次漂移照样会提醒。嫌太钝就调小，别调到几十秒。
+  reanchor_alert_clear_seconds: 600.0
   # Send the projected-zone overlay to Discord so a bad projection is visible.
   notify_on_reanchor: true
 

@@ -239,6 +239,14 @@ and its thresholds), so the warning still arrives - the repair is just left to a
 human. The mode gates the **automatic** path only: `execute_recalibrate.py` and
 the editor's 重锚定 button keep re-anchoring whenever you ask them to.
 
+One drift is one message. The alert is re-armed only after the camera has lined
+up with its reference frame continuously for
+`alignment.reanchor_alert_clear_seconds` (default 600s), not after a single clean
+sample: at night these cameras flicker between "large" and "lined up" every few
+samples, and clearing the flag on that one good sample sent 32 messages in 38
+minutes for a drift that never changed. An unknown mode, or an unknown
+trigger, raises at startup rather than quietly picking a side.
+
 ### 7. Run the tracker
 
 ```bash

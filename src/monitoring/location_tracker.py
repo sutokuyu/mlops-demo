@@ -74,6 +74,11 @@ from src.monitoring.rtsp_stream import StreamReader
 
 EXPECTED_CLASSES = IDENTITY_CLASSES
 
+# How long the alignment has to stay good before a reported drift is re-armed. Long
+# enough to cover the night-time flicker described in note_alignment_restored(), and
+# short enough that a camera someone actually put back is not mute for a day.
+DEFAULT_ALERT_CLEAR_SECONDS = 600.0
+
 
 @dataclass
 class Observation:
@@ -120,9 +125,13 @@ class CameraTracker:
     # Set after a failed re-anchor so the same failure is reported only once. A
     # successful re-anchor clears it and re-arms the alert.
     reanchor_failure_reported: bool = False
-    # One message per drift while re-anchoring only reports. Cleared as soon as the
-    # camera lines up with its reference frame again, which is what re-arms it.
+    # One message per drift while re-anchoring only reports. Cleared once the camera
+    # has lined up with its reference frame for a stretch, which re-arms the alert.
     drift_reported: bool = False
+    # When that clean stretch started, 0 while it is not running. A wall-clock stamp,
+    # like the other cooldowns here, because "has it been ten minutes" is what the
+    # owner cares about rather than how many samples that was.
+    drift_cleared_since: float = 0.0
     # Monotonic timestamp of the first failed sample of a run, 0 while the camera is
     # answering. The clock is monotonic so a system clock jump cannot fake an outage.
     unreachable_since: float = 0.0
@@ -479,25 +488,55 @@ def report_drift(tracker: CameraTracker, settings: dict, reason: str) -> None:
     """Warn that a camera drifted, once, and change nothing else.
 
     The flag is set before sending, so a webhook that is briefly unreachable cannot
-    turn one drift into a message per sampling interval. ``reanchor_reason`` falling
-    quiet is what re-arms it, which means the owner hears about the next drift too.
+    turn one drift into a message per sampling interval. What re-arms it is a lasting
+    recovery, not a quiet sample; see ``note_alignment_restored``.
     """
     if tracker.drift_reported:
         return
     tracker.drift_reported = True
+    tracker.drift_cleared_since = 0.0
     note = announce_drift(tracker.calibration, settings, reason)
     print(f"[{tracker.name}] drift reported: {reason}; {note}")
+
+
+def note_alignment_restored(tracker: CameraTracker, now: float) -> None:
+    """Re-arm the drift alert, but only once the alignment has really recovered.
+
+    One clean sample is not a recovery. At night the match flickers between the two
+    states - three samples read as large, one lines up, three read as large again -
+    so clearing the flag on that one sample re-armed the alert every few samples.
+    Measured on 2026-09-26: sofa sent thirty-two messages between 01:09 and 01:47,
+    at intervals as short as thirty seconds, every one of them describing the same
+    drift. Requiring the clean stretch to last is what makes "one message per drift"
+    true; ``alignment.reanchor_alert_clear_seconds`` is how long it has to last.
+
+    A failed or marginal sample is not a recovery either: the streak reads zero
+    because there was nothing to measure, not because the camera is back in place.
+    """
+    if tracker.alignment is None or tracker.alignment.quality != GOOD:
+        tracker.drift_cleared_since = 0.0
+        return
+    if not tracker.drift_reported:
+        tracker.drift_cleared_since = 0.0
+        return
+    if not tracker.drift_cleared_since:
+        tracker.drift_cleared_since = now
+        return
+    if now - tracker.drift_cleared_since >= ALIGNMENT_CONFIG.get(
+        "reanchor_alert_clear_seconds", DEFAULT_ALERT_CLEAR_SECONDS
+    ):
+        tracker.drift_reported = False
+        tracker.drift_cleared_since = 0.0
 
 
 def maybe_reanchor(tracker: CameraTracker, now: float, settings: dict) -> None:
     """Re-anchor a drifted camera, or - in alert mode - just say that it drifted."""
     reason = reanchor_reason(tracker)
     if reason is None:
-        # The camera lines up with its reference frame again, so the next drift is
-        # news again. Re-armed by that, rather than by a timer: the drift going away
-        # is the only thing that makes a fresh warning worth reading.
-        tracker.drift_reported = False
+        note_alignment_restored(tracker, now)
         return
+    # Drift evidence is back, so any recovery in progress was not one.
+    tracker.drift_cleared_since = 0.0
     if reanchor_mode() == REANCHOR_ALERT:
         report_drift(tracker, settings, reason)
         return

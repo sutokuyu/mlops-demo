@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.monitoring import location_config, location_report, location_tracker
-from src.monitoring.alignment import AlignmentTracker
+from src.monitoring.alignment import FAILED, GOOD, AlignmentTracker
 from src.monitoring.camera_discovery import (
     DiscoveredCamera,
     DiscoveryResult,
@@ -202,7 +202,7 @@ def test_a_drift_is_reported_once_until_the_camera_lines_up_again(
     """One message per drift, not one per sampling interval.
 
     A camera left where it is would otherwise repeat itself every few seconds, and a
-    warning that repeats stops being read. What re-arms it is the drift going away.
+    warning that repeats stops being read. What re-arms it is a lasting recovery.
     """
     trigger_config["reanchor_mode"] = "alert"
     tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
@@ -217,17 +217,92 @@ def test_a_drift_is_reported_once_until_the_camera_lines_up_again(
     settings = {"work_width": 640}
 
     location_tracker.maybe_reanchor(tracker, 1000.0, settings)
-    # Well past the re-anchor cooldown, and still quiet: the flag suppresses this,
-    # not the clock.
+    # Hours later and still quiet: only a lasting recovery re-arms this.
     location_tracker.maybe_reanchor(tracker, 9000.0, settings)
     assert len(reported) == 1
 
+    # One clean sample is not a recovery, and drift resuming inside the window is
+    # still the same drift.
     tracker.alignment.displacement_streak = 0
     location_tracker.maybe_reanchor(tracker, 17000.0, settings)
-
     tracker.alignment.displacement_streak = 3
-    location_tracker.maybe_reanchor(tracker, 18000.0, settings)
+    location_tracker.maybe_reanchor(tracker, 17200.0, settings)
+    assert len(reported) == 1
+
+    # Ten minutes of uninterrupted alignment, and the next drift is news again.
+    tracker.alignment.displacement_streak = 0
+    location_tracker.maybe_reanchor(tracker, 20000.0, settings)
+    location_tracker.maybe_reanchor(tracker, 20800.0, settings)
+    tracker.alignment.displacement_streak = 3
+    location_tracker.maybe_reanchor(tracker, 20900.0, settings)
     assert len(reported) == 2, "the next drift is news again"
+
+
+def test_a_night_of_flickering_matches_is_still_one_message(trigger_config, monkeypatch) -> None:
+    """The pattern the real log shows, replayed: large, large, large, one clean, ...
+
+    On 2026-09-26 sofa sent thirty-two messages between 01:09 and 01:47, at intervals
+    as short as thirty seconds, all of them describing the same drift, because a
+    single clean sample between two flurries of large transforms cleared the flag.
+    """
+    trigger_config["reanchor_mode"] = "alert"
+    tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
+    tracker.reader = FakeReader(object())
+    reported: list[str] = []
+    monkeypatch.setattr(location_tracker, "reanchor", lambda *args, **kwargs: pytest.fail())
+    monkeypatch.setattr(
+        location_tracker,
+        "announce_drift",
+        lambda calibration, settings, reason: reported.append(reason) or "sent",
+    )
+    settings = {"work_width": 640}
+
+    # One sample every five seconds, as tracking.sample_interval_seconds configures.
+    now = 1000.0
+    night_end = now + 12 * 3600
+    while now < night_end:
+        for _ in range(3):
+            tracker.alignment.displacement_streak = 3
+            location_tracker.maybe_reanchor(tracker, now, settings)
+            now += 5.0
+        tracker.alignment.displacement_streak = 0
+        location_tracker.maybe_reanchor(tracker, now, settings)
+        now += 5.0
+
+    assert len(reported) == 1, f"one drift is one message, not {len(reported)}"
+
+
+def test_a_failed_match_does_not_count_as_a_recovery(trigger_config, monkeypatch) -> None:
+    """A failure zeroes the streak because there was nothing to measure.
+
+    Read as a recovery, it would start the quiet window on a sample that says nothing
+    about where the camera is pointing - and at night, failures are most of the night.
+    """
+    trigger_config["reanchor_mode"] = "alert"
+    tracker = a_tracker(AlignmentTracker(camera="sofa", displacement_streak=3))
+    tracker.reader = FakeReader(object())
+    reported: list[str] = []
+    monkeypatch.setattr(location_tracker, "reanchor", lambda *args, **kwargs: pytest.fail())
+    monkeypatch.setattr(
+        location_tracker,
+        "announce_drift",
+        lambda calibration, settings, reason: reported.append(reason) or "sent",
+    )
+    settings = {"work_width": 640}
+
+    location_tracker.maybe_reanchor(tracker, 1000.0, settings)
+
+    tracker.alignment.displacement_streak = 0
+    tracker.alignment.quality = FAILED
+    location_tracker.maybe_reanchor(tracker, 20000.0, settings)
+
+    # Now it really lines up, so the window starts here, not at the failure.
+    tracker.alignment.quality = GOOD
+    location_tracker.maybe_reanchor(tracker, 20100.0, settings)
+    tracker.alignment.displacement_streak = 3
+    location_tracker.maybe_reanchor(tracker, 20600.0, settings)
+
+    assert len(reported) == 1, "six hundred seconds from the failure is not a recovery"
 
 
 def test_an_unknown_reanchor_mode_is_rejected_before_the_tracker_starts(monkeypatch) -> None:
