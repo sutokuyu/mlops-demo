@@ -34,6 +34,9 @@ PREVIEW_CONFIG = LOCATION_CONFIG.get("preview", {})
 # The inbound side of Discord (a bot reading messages). The webhook under
 # report.discord is the outbound side and cannot read anything back.
 DISCORD_BOT_CONFIG = LOCATION_CONFIG.get("discord_bot", {})
+# On-demand live frames ("@bot 沙发"): which words ask for a picture, what the
+# cameras are called in a message, and how long a stream may be held.
+SNAPSHOT_CONFIG = DISCORD_BOT_CONFIG.get("snapshot", {})
 
 IDENTITY_CLASSES = {index: name for index, name in enumerate(CONFIG["cats"]["identity_classes"])}
 DEFAULT_IDENTITY_MODEL = resolve_config_path(CONFIG["models"]["identity_detection_model_path"])

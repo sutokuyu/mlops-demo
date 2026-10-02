@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import src.monitoring.discord_bot as discord_bot
 import src.monitoring.location_report as location_report
+import src.monitoring.snapshot as snapshot_module
 from src.monitoring.discord_bot import (
     DEFAULT_TRIGGERS,
     MESSAGE_CONTENT_FLAG,
@@ -38,6 +39,7 @@ from src.monitoring.discord_bot import (
     describe_settings,
     format_failure,
     ignore_reason,
+    is_snapshot_request,
     matches_trigger,
     mentions_the_bot,
     message_question,
@@ -46,6 +48,7 @@ from src.monitoring.discord_bot import (
     verify_discord_access,
 )
 from src.monitoring.location_store import LocationStore
+from src.monitoring.snapshot import SnapshotReply, SnapshotSettings
 
 DAY = date(2026, 9, 21)
 
@@ -119,9 +122,11 @@ class FakeMessage:
         self.author = SimpleNamespace(id=author_id, bot=is_bot)
         self.mentions = mentions or []
         self.replies: list[str] = []
+        self.uploads: list = []
 
-    async def reply(self, content: str) -> None:
+    async def reply(self, content: str, **kwargs) -> None:
         self.replies.append(content)
+        self.uploads.append(kwargs.get("file"))
 
 
 class FakeGuildChannel:
@@ -758,3 +763,106 @@ def test_an_unreachable_discord_is_reported(monkeypatch) -> None:
     with pytest.raises(DiscordCheckError) as error:
         verify_discord_access(settings())
     assert "could not reach Discord" in str(error.value)
+
+
+# --- on-demand live frames -------------------------------------------------
+#
+# "@bot 沙发" sends back one frame with the zones drawn on it, so the owner can aim
+# a camera without opening the editor. The rules have to keep a question that merely
+# mentions a room ("今天两只猫在沙发上待了多久") a report request, which is why the
+# camera-only case is decided by stripping the camera names out first.
+
+
+def picture_settings(**overrides) -> BotSettings:
+    return settings(
+        snapshot=SnapshotSettings(
+            triggers=("画面", "截图", "照片"),
+            aliases={"客厅": "living_room", "沙发": "sofa", "喂食器": "feeder"},
+            **overrides,
+        )
+    )
+
+
+def test_a_picture_word_asks_for_a_snapshot() -> None:
+    assert is_snapshot_request("沙发画面", picture_settings())
+    assert is_snapshot_request("feeder 截图", picture_settings())
+
+
+def test_a_report_trigger_wins_when_both_appear() -> None:
+    """ "看一下今天的报告" must stay a report, not become a picture."""
+    assert not is_snapshot_request("报告 画面", picture_settings())
+
+
+def test_a_bare_mention_of_a_camera_is_a_snapshot() -> None:
+    assert is_snapshot_request("<@7> 沙发", picture_settings(), mentioned_bot=True)
+    assert is_snapshot_request("<@7> sofa", picture_settings(), mentioned_bot=True)
+
+
+def test_a_question_about_a_room_stays_a_report() -> None:
+    assert not is_snapshot_request(
+        "<@7> 今天两只猫在沙发上待了多久", picture_settings(), mentioned_bot=True
+    )
+
+
+def test_a_snapshot_trigger_is_enough_to_be_answered_without_a_mention() -> None:
+    assert ignore_reason(**answerable(content="feeder 截图")) is None
+
+
+def test_handle_message_replies_with_the_frame_and_deletes_the_temp_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "snapshot.jpg"
+    image.write_bytes(b"jpeg-bytes")
+    monkeypatch.setattr(
+        discord_bot,
+        "build_snapshot_reply",
+        lambda content, settings, cache=None: SnapshotReply("看一下 sofa", image),
+    )
+    uploaded: list = []
+    monkeypatch.setattr(discord_bot, "discord_file", lambda path: uploaded.append(path) or "FILE")
+
+    message = FakeMessage("<@7> 沙发", mentions=[SimpleNamespace(id=7)])
+    asyncio.run(discord_bot.handle_message(message, picture_settings(), bot_id=7))
+
+    assert message.replies == ["看一下 sofa"]
+    assert uploaded == [image]
+    assert message.uploads == ["FILE"]
+    assert not image.exists(), "the upload is Discord's copy now, not a growing temp dir"
+
+
+def test_a_snapshot_without_an_image_sends_only_the_sentence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        discord_bot,
+        "build_snapshot_reply",
+        lambda content, settings, cache=None: SnapshotReply("沙发那张没抓到画面"),
+    )
+    monkeypatch.setattr(discord_bot, "discord_file", lambda path: pytest.fail("nothing to upload"))
+
+    message = FakeMessage("<@7> 沙发", mentions=[SimpleNamespace(id=7)])
+    asyncio.run(discord_bot.handle_message(message, picture_settings(), bot_id=7))
+
+    assert message.replies == ["沙发那张没抓到画面"]
+    assert message.uploads == [None]
+
+
+def test_a_broken_snapshot_becomes_a_sentence(monkeypatch) -> None:
+    def explode(*args, **kwargs):
+        raise RuntimeError("camera config is broken")
+
+    monkeypatch.setattr(discord_bot, "build_snapshot", explode)
+    reply = discord_bot.build_snapshot_reply("沙发画面", picture_settings())
+    assert reply.image_path is None
+    assert "没弄出来" in reply.caption
+    assert "camera config is broken" in reply.caption
+
+
+def test_the_snapshot_block_is_read_from_the_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        snapshot_module,
+        "SNAPSHOT_CONFIG",
+        {"triggers": ["喵一张"], "aliases": {"喵": "feeder"}, "max_width": 640},
+    )
+    configured = discord_bot.bot_settings()
+    assert configured.snapshot.triggers == ("喵一张",)
+    assert configured.snapshot.aliases["喵"] == "feeder"
+    assert configured.snapshot.max_width == 640

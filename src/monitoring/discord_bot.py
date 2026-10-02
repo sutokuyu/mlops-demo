@@ -13,9 +13,9 @@ Developer Portal. Without it the Gateway refuses the connection outright
 (``PrivilegedIntentsRequired``), which is why the preflight checks the
 application's own flags before systemd is allowed to start anything.
 
-Everything except ``build_client``/``run`` is deliberately free of any ``discord``
-import. The decision rules (which messages to answer, which day they mean, what to
-reply) are the part worth testing, and they must stay testable - and
+Everything except ``build_client``/``run``/``discord_file`` is deliberately free of any
+``discord`` import. The decision rules (which messages to answer, which day they mean,
+what to reply) are the part worth testing, and they must stay testable - and
 preflightable - without a token, a connection, or the library installed. The
 Gateway shell is duck-typed for the same reason: :func:`handle_message` only needs
 an object that quacks like ``discord.Message``.
@@ -29,7 +29,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -40,13 +40,24 @@ from src.config_loader import load_env_file, resolve_config_path
 # ${VAR} from the environment at import time - the bot token among them.
 load_env_file()
 
-from src.monitoring.location_config import DISCORD_BOT_CONFIG, REPORT_CONFIG
+from src.monitoring.location_config import (
+    DISCORD_BOT_CONFIG,
+    REPORT_CONFIG,
+    configured_cameras,
+)
 from src.monitoring.location_report import (
     DISCORD_MESSAGE_LIMIT,
     MAX_QUESTION_CHARACTERS,
     build_summary,
     compose,
     render_text,
+)
+from src.monitoring.snapshot import (
+    SnapshotReply,
+    SnapshotSettings,
+    build_snapshot,
+    camera_only_reference,
+    snapshot_settings,
 )
 
 DEFAULT_TRIGGERS = ("报告", "日报", "report")
@@ -110,6 +121,9 @@ class BotSettings:
     days_ago: int
     database: Path | None
     temperature: float | None
+    # On-demand live frames. Defaulted so a BotSettings built by a test (or by an
+    # older caller) still answers a snapshot request out of the box.
+    snapshot: SnapshotSettings = field(default_factory=snapshot_settings)
 
 
 def _numeric_ids(raw, field: str) -> frozenset[int]:
@@ -162,6 +176,7 @@ def bot_settings() -> BotSettings:
         days_ago=int(DISCORD_BOT_CONFIG.get("days_ago", DEFAULT_DAYS_AGO)),
         database=resolve_config_path(database) if database else None,
         temperature=float(temperature) if temperature is not None else None,
+        snapshot=snapshot_settings(),
     )
 
 
@@ -238,9 +253,14 @@ def ignore_reason(
         )
     if mentioned_bot:
         return None
-    if not matches_trigger(content, settings.triggers):
-        triggers = ", ".join(settings.triggers)
-        return f"no trigger word ({triggers}) in {content[:40]!r}, and the bot was not mentioned"
+    # A picture request is answered too, so both trigger lists open the gate; which
+    # answer to send is then decided by is_snapshot_request().
+    triggers = settings.triggers + settings.snapshot.triggers
+    if not matches_trigger(content, triggers):
+        return (
+            f"no trigger word ({', '.join(triggers)}) in {content[:40]!r}, "
+            "and the bot was not mentioned"
+        )
     return None
 
 
@@ -345,9 +365,52 @@ def describe_settings(settings: BotSettings) -> str:
     channels = ", ".join(str(item) for item in sorted(settings.allowed_channel_ids)) or "any"
     users = ", ".join(str(item) for item in sorted(settings.allowed_user_ids)) or "any"
     return (
-        f"triggers={settings.triggers} default_day=days_ago:{settings.days_ago} "
-        f"channels={channels} users={users}"
+        f"triggers={settings.triggers} snapshot_triggers={settings.snapshot.triggers} "
+        f"default_day=days_ago:{settings.days_ago} channels={channels} users={users}"
     )
+
+
+def is_snapshot_request(
+    content: str, settings: BotSettings, *, mentioned_bot: bool = False
+) -> bool:
+    """Whether this message asks for a picture rather than the day's report.
+
+    A report trigger wins when both appear - "看一下今天的报告" is still a report - and
+    mentioning one of the picture words anywhere makes it a snapshot. A real @mention
+    whose message is nothing but a camera name ("@bot sofa") also counts: that is the
+    shortest way to ask, and it is why the camera names are stripped before deciding.
+    """
+    if matches_trigger(content, settings.triggers):
+        return False
+    if matches_trigger(content, settings.snapshot.triggers):
+        return True
+    if not mentioned_bot:
+        return False
+    return camera_only_reference(content, configured_cameras(), settings.snapshot.aliases)
+
+
+def build_snapshot_reply(content: str, settings: BotSettings, cache=None) -> SnapshotReply:
+    """Blocking: grab one frame, draw the zones and write a JPEG.
+
+    Separated from the async shell because it opens an RTSP stream and runs ORB
+    alignment, neither of which may happen on the Gateway's event loop. Anything the
+    snapshot module did not already turn into a sentence is caught here: a reply has
+    to arrive in the channel, and a traceback in the journal does not.
+    """
+    try:
+        return build_snapshot(content, settings=settings.snapshot, cache=cache)
+    except Exception as error:  # the bot must answer, whatever broke
+        print(f"discord_bot: snapshot failed: {error}", file=sys.stderr)
+        return SnapshotReply(
+            f"这张画面没弄出来：{error}\n细节在 journalctl --user -u cat-discord 里。"
+        )
+
+
+def discord_file(path):
+    """A ``discord.File`` for a local image - the second and last discord import."""
+    import discord
+
+    return discord.File(str(path))
 
 
 async def handle_message(message, settings: BotSettings, bot_id: int | None = None) -> None:
@@ -362,13 +425,14 @@ async def handle_message(message, settings: BotSettings, bot_id: int | None = No
     ones that are ignored. That line is the difference between "the bot is broken"
     and "the bot never saw your message".
     """
+    mentioned = mentions_the_bot(message, bot_id)
     reason = ignore_reason(
         message.content,
         channel_id=message.channel.id,
         author_id=message.author.id,
         is_bot=bool(message.author.bot),
         settings=settings,
-        mentioned_bot=mentions_the_bot(message, bot_id),
+        mentioned_bot=mentioned,
     )
     if reason is not None:
         print(
@@ -376,6 +440,24 @@ async def handle_message(message, settings: BotSettings, bot_id: int | None = No
             flush=True,
         )
         return
+
+    if is_snapshot_request(message.content, settings, mentioned_bot=mentioned):
+        print(
+            f"discord_bot: live frame requested by {message.author} in {message.channel}",
+            flush=True,
+        )
+        async with message.channel.typing():
+            reply = await asyncio.to_thread(build_snapshot_reply, message.content, settings)
+        upload = {"file": discord_file(reply.image_path)} if reply.image_path else {}
+        try:
+            await message.reply(reply.caption, **upload)
+        finally:
+            # Discord holds the upload now, so a local temp file is just litter that
+            # would otherwise accumulate one per request.
+            if reply.image_path is not None:
+                Path(reply.image_path).unlink(missing_ok=True)
+        return
+
     print(
         f"discord_bot: report requested by {message.author} in {message.channel}",
         flush=True,
@@ -414,9 +496,9 @@ def describe_channel_access(client, channel_id: int) -> str:
 def build_client(settings: BotSettings):
     """Create the Discord client and register its handlers; connects nothing.
 
-    The ``discord`` import lives here rather than at module level so the pure
-    helpers above stay usable on a fresh clone whose dependencies are not
-    installed yet - ``--check-only`` has to work before the library is there.
+    The ``discord`` import lives here (and in ``discord_file``) rather than at module
+    level so the pure helpers above stay usable on a fresh clone whose dependencies
+    are not installed yet - ``--check-only`` has to work before the library is there.
     """
     import discord
 

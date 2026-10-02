@@ -14,7 +14,9 @@ ENV_PATH_VARIABLE = "MLOPS_ENV_FILE"
 _loaded_env_paths: set[Path] = set()
 
 
-def load_env_file(path: str | Path | None = None, *, override: bool = True) -> bool:
+def load_env_file(
+    path: str | Path | None = None, *, override: bool = True, force: bool = False
+) -> bool:
     """Apply .env to ``os.environ``, and report whether a file was read at all.
 
     Every runnable entry point calls this *before* importing anything that reads the
@@ -30,14 +32,16 @@ def load_env_file(path: str | Path | None = None, *, override: bool = True) -> b
     ``MLOPS_ENV_FILE`` at another file.
 
     Reading the same path twice is a no-op, so a second call cannot undo something a
-    caller set in between.
+    caller set in between. ``force=True`` asks for that no-op protection to be lifted:
+    it is for a long-running process that wants a value the file has gained *since*
+    startup, e.g. a camera address the tracker rewrote while the bot was connected.
     """
     resolved = (
         Path(path)
         if path is not None
         else Path(os.environ.get(ENV_PATH_VARIABLE) or DEFAULT_ENV_PATH)
     )
-    if resolved in _loaded_env_paths:
+    if resolved in _loaded_env_paths and not force:
         return True
     if not resolved.is_file():
         return False

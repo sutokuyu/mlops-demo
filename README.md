@@ -4,7 +4,8 @@ Three fixed RTSP cameras watch a living room. A YOLO model detects **which** cat
 is in frame, zone polygons drawn on each camera's reference frame turn that into
 a room location, and the result is recorded to SQLite around the clock. A
 scheduled job turns the finished day into a short narrative and posts it to
-Discord. Ask in the channel what happened today and the bot answers there too.
+Discord. Ask in the channel what happened today and the bot answers there too, or
+ask it for a live frame with the zones drawn on it to aim a camera.
 
 ## Project Goal
 
@@ -18,6 +19,8 @@ Discord. Ask in the channel what happened today and the bot answers there too.
   nudged camera does not silently relabel the room.
 - Record dwell visits 24/7 and report the day.
 - Answer questions about the day, asked in Discord, from the same data.
+- Send one live frame on request, with the zones drawn where they are stored, so
+  a camera can be re-aimed without opening the editor.
 
 ## Pipeline
 
@@ -43,6 +46,7 @@ location_tracker.py ──► data/location_history.db
    │                          │
    ├── realtime_view.py       │  where is the cat, right now
    ├── discord_bot.py ────────┤  "报告一下今天两只猫都做什么了" (inbound)
+   ├── snapshot.py            │  "@bot 沙发" ──► one frame, zones drawn
    └── location_report.py ────┘  what happened today ──► Discord (webhook)
 ```
 
@@ -393,6 +397,38 @@ quotes the question back, so answering a bot would loop).
   replies with the day and the reason, and if only the LLM call fails it replies
   with the plain `render_text()` summary rather than an apology.
 
+#### Ask for a live frame
+
+The same bot can send one frame from a camera with the zone polygons drawn on it,
+for aiming a camera without opening the editor:
+
+```
+沙发画面
+feeder 截图
+@Cat monitor assistant sofa
+```
+
+Any word from `discord_bot.snapshot.triggers` asks for a picture, and a real
+@mention whose whole message is a camera name counts too. Cameras can be named by
+their key (`living_room`, or `living room` with a space instead of the underscore)
+or by any alias under `discord_bot.snapshot.aliases` (`沙发`, `客厅`, `喂食器`). Name
+no camera and the only configured camera is used, or the bot replies with the
+choices.
+
+The zones are drawn **where they are stored**, in the reference frame's
+coordinates - deliberately not projected onto the live frame. A projection would
+follow the camera and hide exactly the misalignment you are looking for; drawn as
+stored, a polygon that no longer sits on its furniture is the signal. The
+`align=` note on the image (and the sentence under it) says how far the live view
+is from the reference frame, which tells a moved camera apart from changed
+lighting.
+
+The bot holds one stream per camera while you keep asking and releases it
+`discord_bot.snapshot.idle_timeout_seconds` after the last request, so an aiming
+session costs one extra session on the relay rather than one per message. The
+camera address is re-read from `.env` per request, so a camera the tracker has
+relocated is found without restarting the bot.
+
 ### 10. Run it 24/7
 
 `deploy/systemd/` holds five units: `cat-tracker.service` runs the recorder with
@@ -453,6 +489,7 @@ After editing a unit file, `systemctl --user daemon-reload` then restart. Editin
 | `alignment` | ORB matching thresholds and the trust-last-good window |
 | `report` | Timezone, language, delivery mode, and the LLM settings |
 | `discord_bot` | Bot token, channel/user allowlists, trigger words, default day |
+| `discord_bot.snapshot` | Picture-request words, camera aliases, image size, how long a stream is held |
 
 ### Prompt Layers
 
@@ -494,7 +531,9 @@ scan, the stream open and the picture match are injected, so the rules that cost
 real debugging - which signal decides identity, and what to do when the evidence
 disagrees - are tested without one.
 The bot tests run without a token or a connection: everything above `run()` in
-`discord_bot.py` is free of any `discord` import on purpose. The two JavaScript
+`discord_bot.py` is free of any `discord` import on purpose (the two exceptions,
+`build_client` and `discord_file`, exist only to create the client and to attach an
+uploaded image). The two JavaScript
 guards are worth knowing about: one checks per-line quote balance (a raw newline
 inside a Python string ends a JS string literal early and the browser discards the
 whole script), the other checks that every function the JS calls is defined.
