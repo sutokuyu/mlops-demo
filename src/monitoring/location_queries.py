@@ -281,8 +281,10 @@ def stay_rows(
         for visit in matched[: max(0, limit)]
     ]
     counts_by_cat: dict[str, int] = {}
+    counts_by_zone: dict[str, int] = {}
     for visit in matched:
         counts_by_cat[visit.cat] = counts_by_cat.get(visit.cat, 0) + 1
+        counts_by_zone[visit.zone] = counts_by_zone.get(visit.zone, 0) + 1
     return {
         "zones": sorted(wanted),
         "cat": cat or "all",
@@ -292,6 +294,9 @@ def stay_rows(
             sum(max(0.0, visit.end_ts - visit.start_ts) for visit in matched) / 60, 1
         ),
         "counts_by_cat": counts_by_cat,
+        # A word like 湿粮碗 covers several zones; this is how the answer can still say
+        # which bowl the cat used.
+        "counts_by_zone": counts_by_zone,
         "cameras": sorted({visit.camera for visit in matched}),
         "stays": stays,
         "truncated": len(matched) > len(stays),

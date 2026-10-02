@@ -453,6 +453,14 @@ Two fixes, both in code:
 * **`report.zone_aliases`** maps each zone identifier to the words that may refer to it
   (`sink: [水池, 水槽, ...]`). The same list goes into the prompt as the allowed
   vocabulary and drives the resolver, so the question and the data share one language.
+  One word belongs to exactly one zone here - a word claimed by two is a typo, and a test
+  fails on it.
+* **`report.zone_groups`** is for a word that genuinely means several zones. The cat has
+  two wet food bowls, so `湿粮碗: [wet_food_bowl_1, wet_food_bowl_2]` makes "去过湿粮碗吗"
+  count both, while the answer still breaks the total down per bowl
+  (`counts_by_zone`). A numbered word still wins over the group: "湿粮碗2" is only bowl 2.
+  Zone names that repeat across cameras need no group - `sink` is one identifier on two
+  cameras, and the answer names the camera.
 * **`location_queries.answer_question()`** turns a question that names a place into an
   exact count - times, minutes, cameras - which rides to the model as a `query` field it
   must answer from instead of recounting the timeline. A question naming no place still
@@ -548,6 +556,7 @@ After editing a unit file, `systemctl --user daemon-reload` then restart. Editin
 | `alignment` | ORB matching thresholds and the trust-last-good window |
 | `report` | Timezone, language, delivery mode, and the LLM settings |
 | `report.zone_aliases` | Zone identifier → the words the owner uses for it (the shared vocabulary) |
+| `report.zone_groups` | A word that means several zones at once (e.g. 湿粮碗 = bowl 1 or 2) |
 | `report.query` | Limits for the code-computed answers (`max_stays`, `max_days`) |
 | `discord_bot` | Bot token, channel/user allowlists, trigger words, default day |
 | `discord_bot.snapshot` | Picture-request words, camera aliases, image size, how long a stream is held |

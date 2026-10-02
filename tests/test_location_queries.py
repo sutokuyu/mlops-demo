@@ -33,6 +33,7 @@ from src.monitoring.zone_vocabulary import (
     resolve_zones,
     vocabulary_text,
     zone_aliases,
+    zone_groups,
 )
 
 TZ = ZoneInfo("Asia/Tokyo")
@@ -81,6 +82,50 @@ def test_the_longest_word_wins() -> None:
     assert resolve_zones("餐桌底下") == ["under_dining_table"]
     assert resolve_zones("沙发上") == ["on_sofa"]
     assert resolve_zones("沙发底下") == ["under_sofa"]
+
+
+# --- one word, several zones ----------------------------------------------
+#
+# The cat has two wet food bowls, so "去过湿粮碗吗" means either and usually both. That
+# is not the same thing as two zones accidentally sharing a word, which would be a typo:
+# aliases stay one word to one zone (a test enforces it) and this lives in `zone_groups`.
+
+
+def test_a_word_can_mean_several_zones() -> None:
+    assert resolve_zones("kurumi 有没有去过湿粮碗") == ["wet_food_bowl_1", "wet_food_bowl_2"]
+    assert resolve_zones("饭碗呢") == ["wet_food_bowl_1", "wet_food_bowl_2"]
+
+
+def test_a_numbered_word_still_beats_the_group_it_belongs_to() -> None:
+    assert resolve_zones("湿粮碗2") == ["wet_food_bowl_2"]
+    assert resolve_zones("湿粮碗1") == ["wet_food_bowl_1"]
+
+
+def test_a_group_and_a_specific_zone_in_one_question_are_both_found() -> None:
+    assert resolve_zones("湿粮碗和猫砂盆") == [
+        "wet_food_bowl_1",
+        "wet_food_bowl_2",
+        "toilet_1",
+    ]
+
+
+def test_no_group_word_is_also_an_alias_word() -> None:
+    """Otherwise the two mechanisms silently merge into one union."""
+    alias_words = {word.lower() for words in zone_aliases().values() for word in words}
+    group_words = {word.lower() for word in zone_groups()}
+    assert alias_words & group_words == set()
+
+
+def test_every_group_names_a_zone_that_exists_on_some_camera() -> None:
+    existing = set(known_zones())
+    missing = {zone for zones in zone_groups().values() for zone in zones if zone not in existing}
+    assert missing == set(), f"these groups point at zones no camera has: {sorted(missing)}"
+
+
+def test_the_prompt_text_offers_a_group_as_alternatives() -> None:
+    text = vocabulary_text()
+    assert "wet_food_bowl_1 + wet_food_bowl_2 = 湿粮碗 (either one)" in text
+    assert "wet_food_bowl_1 = 湿粮碗1" in text
 
 
 def test_a_question_about_no_place_resolves_to_nothing() -> None:
@@ -336,3 +381,22 @@ def test_the_question_narrows_to_the_cat_it_names(tmp_path: Path) -> None:
 
     only_bagel = queries.answer_question("bagel 有没有在水池待过", database=database, now=NOW)
     assert only_bagel["count"] == 0
+
+
+def test_a_group_question_counts_both_zones_and_still_says_which(tmp_path: Path) -> None:
+    """ "去过湿粮碗吗" has to reach both bowls without losing which one it was."""
+    rows = [
+        (date(2026, 10, 2), 60, "kurumi", "feeder", "wet_food_bowl_1", 5.0),
+        (date(2026, 10, 2), 300, "kurumi", "feeder", "wet_food_bowl_2", 3.0),
+        (date(2026, 10, 2), 600, "kurumi", "feeder", "feeder", 1.0),
+    ]
+    database = seed(tmp_path / "history.db", rows)
+
+    verdict = queries.answer_question("kurumi 有没有去过湿粮碗", database=database, now=NOW)
+    assert verdict["count"] == 2
+    assert verdict["total_minutes"] == pytest.approx(8.0)
+    assert verdict["counts_by_zone"] == {"wet_food_bowl_1": 1, "wet_food_bowl_2": 1}
+
+    only_two = queries.answer_question("kurumi 去过湿粮碗2吗", database=database, now=NOW)
+    assert only_two["count"] == 1
+    assert only_two["counts_by_zone"] == {"wet_food_bowl_2": 1}

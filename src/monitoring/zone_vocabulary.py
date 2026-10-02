@@ -37,7 +37,7 @@ DEFAULT_ZONE_ALIASES: dict[str, list[str]] = {
     "sink": ["水池", "水槽", "洗碗池", "洗碗槽", "洗手池"],
     "toilet_1": ["猫砂盆", "厕所", "猫厕所"],
     "feeder": ["喂食器", "食盆"],
-    "wet_food_bowl_1": ["湿粮碗", "湿粮碗1", "饭碗"],
+    "wet_food_bowl_1": ["湿粮碗1"],
     "wet_food_bowl_2": ["湿粮碗2"],
     "water_server": ["饮水机", "水碗", "水盆"],
     "bay_window": ["飘窗", "窗台"],
@@ -58,6 +58,16 @@ DEFAULT_ZONE_ALIASES: dict[str, list[str]] = {
     "on_kangaroo_chair": ["袋鼠椅上"],
     "under_kangaroo_chair": ["袋鼠椅底下"],
     "floor": ["地板", "地上"],
+}
+
+# Words that mean more than one place. "湿粮碗" is the cat's wet food, and there are two
+# of them: the owner means either one (and usually both in the same answer), so a
+# question about 湿粮碗 has to reach both zones. Kept separate from the aliases above on
+# purpose - there a word claimed by two zones is a typo and a test fails on it, whereas
+# here naming several zones is the whole point.
+DEFAULT_ZONE_GROUPS: dict[str, list[str]] = {
+    "湿粮碗": ["wet_food_bowl_1", "wet_food_bowl_2"],
+    "饭碗": ["wet_food_bowl_1", "wet_food_bowl_2"],
 }
 
 
@@ -89,12 +99,25 @@ def zone_aliases(config: Mapping | None = None) -> dict[str, list[str]]:
     return merged
 
 
+def zone_groups(config: Mapping | None = None) -> dict[str, list[str]]:
+    """Owner word -> every zone it can mean.
+
+    The configured block replaces a word's default list; other words keep theirs. See
+    ``DEFAULT_ZONE_GROUPS`` for why this is not folded into ``zone_aliases``.
+    """
+    raw = (config if config is not None else REPORT_CONFIG.get("zone_groups")) or {}
+    merged = {word: list(zones) for word, zones in DEFAULT_ZONE_GROUPS.items()}
+    for word, zones in raw.items():
+        merged[str(word)] = [str(zone) for zone in _as_words(zones)]
+    return merged
+
+
 def alias_index(aliases: Mapping[str, Iterable[str]] | None = None) -> dict[str, str]:
     """Owner word -> zone identifier, lower-cased for matching.
 
-    A later zone overwrites an earlier one, which is why the ambiguity is documented
-    rather than hidden: two zones sharing a word is a config mistake, and
-    :func:`ambiguous_words` reports it so a test can fail on it.
+    One word to one zone by design: a word claimed by two zones here is a typo, and
+    :func:`ambiguous_words` exists so a test fails on it. A word that genuinely means
+    several places belongs in :func:`zone_groups` instead.
     """
     index: dict[str, str] = {}
     for zone, words in (aliases if aliases is not None else zone_aliases()).items():
@@ -124,30 +147,58 @@ def _identifier_pattern(zone: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(zone)}(?![A-Za-z0-9_])", re.IGNORECASE)
 
 
+def word_map(
+    aliases: Mapping[str, Iterable[str]] | None = None,
+    groups: Mapping[str, Iterable[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Every owner word -> every zone it can mean, lower-cased.
+
+    Aliases and groups are merged here rather than at the call site, so a resolver never
+    has to know which of the two a word came from. A word in both gets the union.
+    """
+    mapping: dict[str, list[str]] = {}
+
+    def add(word: str, zones: Iterable[str]) -> None:
+        bucket = mapping.setdefault(str(word).lower(), [])
+        for zone in zones:
+            if zone not in bucket:
+                bucket.append(zone)
+
+    for word, zone in alias_index(aliases).items():
+        add(word, [zone])
+    for word, zones in (groups if groups is not None else zone_groups()).items():
+        add(word, zones)
+    return mapping
+
+
 def resolve_zones(
     text: str,
     *,
     aliases: Mapping[str, Iterable[str]] | None = None,
+    groups: Mapping[str, Iterable[str]] | None = None,
     zones: Sequence[str] | None = None,
 ) -> list[str]:
     """Every zone the text refers to, by identifier or by one of its words.
 
     Matched longest first and **consumed**, so "餐桌底下" resolves to
     ``under_dining_table`` instead of also to ``on_dining_table`` through the "餐桌"
-    inside it, while "餐桌底下和沙发上" still finds both. Returns identifiers in match
-    order, de-duplicated.
+    inside it, while "餐桌底下和沙发上" still finds both. A word that means several
+    zones contributes all of them, so "去过湿粮碗吗" reaches both bowls. Returns
+    identifiers in match order, de-duplicated.
     """
     remaining = text
     found: list[str] = []
-    index = alias_index(aliases)
-    for word, zone in sorted(index.items(), key=lambda item: (-len(item[0]), item[0])):
+    for word, targets in sorted(
+        word_map(aliases, groups).items(), key=lambda item: (-len(item[0]), item[0])
+    ):
         if not word:
             continue
         pattern = re.compile(re.escape(word), re.IGNORECASE)
         if not pattern.search(remaining):
             continue
-        if zone not in found:
-            found.append(zone)
+        for zone in targets:
+            if zone not in found:
+                found.append(zone)
         remaining = pattern.sub(" ", remaining)
     for zone in zones if zones is not None else known_zones():
         pattern = _identifier_pattern(zone)
@@ -162,13 +213,15 @@ def resolve_zones(
 def vocabulary_text(
     *,
     aliases: Mapping[str, Iterable[str]] | None = None,
+    groups: Mapping[str, Iterable[str]] | None = None,
     zones: Sequence[str] | None = None,
 ) -> str:
     """The mapping as prompt text: ``sink = 水池/水槽`` one zone per line.
 
     Only zones that exist in the data are listed, so the model is never handed a name it
     cannot find - and a zone with no words at all still appears, because knowing the
-    identifier is enough to answer a question that uses it.
+    identifier is enough to answer a question that uses it. A word that means several
+    zones is listed as ``wet_food_bowl_1 + wet_food_bowl_2 = 湿粮碗 (either one)``.
     """
     existing = list(zones if zones is not None else known_zones())
     mapping = zone_aliases() if aliases is None else {z: list(w) for z, w in aliases.items()}
@@ -179,4 +232,8 @@ def vocabulary_text(
     for zone, words in mapping.items():
         if zone not in existing and words:
             lines.append(f"- {zone} (not present in any camera's zones) = {'/'.join(words)}")
+    for word, zones_ in (groups if groups is not None else zone_groups()).items():
+        targets = list(zones_)
+        if len(targets) > 1:
+            lines.append(f"- {' + '.join(targets)} = {word} (either one)")
     return "\n".join(lines)

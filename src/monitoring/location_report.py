@@ -155,8 +155,11 @@ MAX_QUESTION_CHARACTERS = 200
 VOCABULARY = (
     "The location identifiers the data uses, each with the words the owner uses for it:\n"
     "{mapping}\n"
-    "A question using any word on the right is a question about the identifier on the left, "
-    "and a word that is not on this list is a place this system does not track. Never "
+    "A question using any word on the right is a question about the identifier on the "
+    "left, and a word that is not on this list is a place this system does not track. A "
+    "line that names several identifiers with `+` means those identifiers together, and "
+    "the words on its right mean any of them - report them as one answer, not as a guess "
+    "at which single one was meant. Never "
     "translate an identifier into some other place name, and never work out what an owner's "
     "word means from anything except this list."
 )

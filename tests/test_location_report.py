@@ -857,6 +857,9 @@ def test_build_summary_finds_a_visit_that_never_became_a_zone(tmp_path: Path) ->
 def test_the_prompt_carries_the_zone_vocabulary() -> None:
     instruction = build_instruction("zh")
     assert "sink = 水池/水槽" in instruction
+    # A word that means several zones is offered as alternatives, so the model does not
+    # have to pick one bowl and pretend that was what was asked.
+    assert "wet_food_bowl_1 + wet_food_bowl_2 = 湿粮碗" in instruction
     assert VOCABULARY.split("{")[0].strip() in instruction
 
 
