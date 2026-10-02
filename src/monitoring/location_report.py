@@ -31,6 +31,7 @@ load_env_file()
 
 from src.monitoring.location_store import LocationStore
 from src.monitoring.location_zones import load_zones
+from src.monitoring.zone_vocabulary import vocabulary_text
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 LOCATION_CONFIG = load_config(PROJECT_ROOT / "configs" / "locations.yaml")
@@ -146,6 +147,32 @@ QUESTION = (
 # would otherwise be able to push GROUNDING_RULES out of the model's attention.
 MAX_QUESTION_CHARACTERS = 200
 
+# The vocabulary the questions and the data must share. Measured on 2026-10-02: asked
+# "猫有没有进过水池" the bot answered "数据里没这个记录" while the database held four
+# `sink` stays that day, and answered correctly from the same data when the question used
+# the identifier. The owner's word and the stored name have to be tied together somewhere,
+# and this block is that tie, in both directions.
+VOCABULARY = (
+    "The location identifiers the data uses, each with the words the owner uses for it:\n"
+    "{mapping}\n"
+    "A question using any word on the right is a question about the identifier on the left, "
+    "and a word that is not on this list is a place this system does not track. Never "
+    "translate an identifier into some other place name, and never work out what an owner's "
+    "word means from anything except this list."
+)
+
+# Present only when a code-computed answer was attached to the data. The model is not
+# asked to count here - counting from the timeline is exactly what it got wrong - only to
+# phrase a result that is already exact.
+QUERY = (
+    "`query` in the data is the answer to the owner's question, computed in code from the "
+    "same database; it names the range it covers and its counts, times and cameras are "
+    "exact. Answer from it first and quote its numbers. Do not recount the question from "
+    "`timeline`, and when its `count` is 0 the answer is that there is no such record in "
+    "that range - say exactly that, and do not add a pass-by or any other conclusion the "
+    "data does not contain."
+)
+
 # Deliberately not configurable. Models happily invent a plausible day when a
 # playful tone is requested, so this stays last in the prompt for recency.
 GROUNDING_RULES = (
@@ -160,6 +187,8 @@ def build_instruction(
     style: str | None = None,
     hints: str | None = None,
     question: str | None = None,
+    query: dict | None = None,
+    vocabulary: str | None = None,
 ) -> str:
     """Compose the system prompt from tunable voice plus fixed requirements.
 
@@ -177,6 +206,17 @@ def build_instruction(
     Passing ``None`` for any block means "use the configured one"; an explicit
     empty string asks for that block to be omitted. A blank ``question`` is
     omitted like any other empty block.
+
+    ``query`` is a code-computed answer for a specific question (see
+    ``location_queries.answer_question``). It adds the instruction to read that answer
+    instead of counting from the timeline, and it is passed through as data by
+    :func:`call_llm`; the block is omitted when there is none, so the daily report's
+    prompt is unchanged.
+
+    ``vocabulary`` maps zone identifiers to the words the owner uses for them. It is
+    derived from ``report.zone_aliases`` when not given, and it is always present: the
+    daily report translates zone names too, and the same mismatch that made the bot deny
+    a real ``sink`` record would just as easily mislabel the narrative.
     """
     config = REPORT_CONFIG["llm"]
     if persona is None:
@@ -185,6 +225,8 @@ def build_instruction(
         style = config.get("style") or ""
     if hints is None:
         hints = config.get("hints") or ""
+    if vocabulary is None:
+        vocabulary = vocabulary_text()
 
     question_block = ""
     if question and question.strip():
@@ -196,8 +238,10 @@ def build_instruction(
         persona.strip() or NEUTRAL_PERSONA,
         TASK,
         question_block,
+        QUERY if query else "",
         EVENTS,
         PRESENTATION.format(language=language),
+        VOCABULARY.format(mapping=vocabulary) if vocabulary.strip() else "",
         style.strip(),
         hints.strip(),
         f"Keep the whole message under {MAX_REPORT_CHARACTERS} characters.",
@@ -593,18 +637,29 @@ def llm_temperature(override: float | None = None) -> float:
     return value
 
 
-def call_llm(summary: dict, temperature: float | None = None, question: str | None = None) -> str:
+def call_llm(
+    summary: dict,
+    temperature: float | None = None,
+    question: str | None = None,
+    query: dict | None = None,
+) -> str:
     llm = REPORT_CONFIG["llm"]
     if not llm["api_key"]:
         raise RuntimeError("report.llm.api_key is not configured")
     language = REPORT_CONFIG.get("language", "zh")
-    instruction = build_instruction(language, question=question)
+    instruction = build_instruction(language, question=question, query=query)
+    # The computed answer rides along as one more JSON field, so the user message stays
+    # pure data (the owner's own words never go here - the question only ever appears in
+    # the system prompt, where it is capped).
+    payload_summary = dict(summary)
+    if query is not None:
+        payload_summary["query"] = query
     payload = {
         "model": llm["model"],
         "temperature": llm_temperature(temperature),
         "messages": [
             {"role": "system", "content": instruction},
-            {"role": "user", "content": json.dumps(summary, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(payload_summary, ensure_ascii=False)},
         ],
     }
     body = _post(
@@ -656,6 +711,7 @@ def compose(
     text: str,
     temperature: float | None = None,
     question: str | None = None,
+    query: dict | None = None,
 ) -> str:
     """The outbound text, after any LLM rewriting for the configured mode.
 
@@ -664,10 +720,10 @@ def compose(
 
     ``question`` is only used by the Discord bot (and by any other caller that
     wants the narrative to answer something specific); the daily report leaves it
-    as ``None``.
+    as ``None``. ``query`` is a code-computed answer attached to that question.
     """
     if REPORT_CONFIG.get("mode", "discord").lower() == "llm":
-        return call_llm(summary, temperature, question)
+        return call_llm(summary, temperature, question, query)
     return text
 
 

@@ -47,6 +47,7 @@ location_tracker.py ──► data/location_history.db
    ├── realtime_view.py       │  where is the cat, right now
    ├── discord_bot.py ────────┤  "报告一下今天两只猫都做什么了" (inbound)
    ├── snapshot.py            │  "@bot 沙发" ──► one frame, zones drawn
+   ├── location_queries.py    │  "进过水池吗" ──► counted in code, as callable tools
    └── location_report.py ────┘  what happened today ──► Discord (webhook)
 ```
 
@@ -56,7 +57,7 @@ location_tracker.py ──► data/location_history.db
 | --- | --- |
 | `src/data/` | Dataset collection and preparation |
 | `src/training/` | YOLO detection training |
-| `src/monitoring/` | Zones, alignment, tracking, reporting, browser UI |
+| `src/monitoring/` | Zones, alignment, tracking, reporting, query tools, browser UI |
 | `src/notification/` | Discord webhook posting |
 | `configs/config.yaml` | Cameras, model paths, training defaults |
 | `configs/locations.yaml` | Tracking loop, alignment, preview, report, Discord bot |
@@ -429,6 +430,64 @@ session costs one extra session on the relay rather than one per message. The
 camera address is re-read from `.env` per request, so a camera the tracker has
 relocated is found without restarting the bot.
 
+#### Ask about a place
+
+A question that names a place is **counted in code** before the model sees it:
+
+```
+kurumi 有没有进过水池      # ever, over all recorded history
+kurumi 今天在猫砂盆待了多久
+bagel 最近3天去过哪
+```
+
+This is the third time the same lesson came back. The toilet rule was right about a
+third of the time while it lived in `hints`; the meal rule was applied unevenly between
+the two cats because the model invented its own criterion; and on 2026-10-02 the bot
+answered "没进过水池" while the database held four `sink` stays that day. Asked with the
+identifier instead, the same model on the same data answered correctly - so the failure
+was that the owner's word and the stored name never met, and ``GROUNDING_RULES`` turned
+that into a confident "no such record" (one run even invented support for it).
+
+Two fixes, both in code:
+
+* **`report.zone_aliases`** maps each zone identifier to the words that may refer to it
+  (`sink: [水池, 水槽, ...]`). The same list goes into the prompt as the allowed
+  vocabulary and drives the resolver, so the question and the data share one language.
+* **`location_queries.answer_question()`** turns a question that names a place into an
+  exact count - times, minutes, cameras - which rides to the model as a `query` field it
+  must answer from instead of recounting the timeline. A question naming no place still
+  goes down the old path untouched.
+
+A question with no time word defaults to today; 昨天/前天/最近N天/这周/本月 and explicit
+dates all work. "有没有进过" without a time word means *all recorded history*, because
+that is what it asks, and scoping it to today is how the 10-02 record stayed invisible
+on the 10-03 question. Zone names repeat across cameras (`sink` is on both living_room
+and sofa), so every answer names its camera.
+
+#### The tool layer a harness calls
+
+The counting lives in `src/monitoring/location_queries.py`, shaped so a DeepSeek
+harness (or any function-calling loop) can use it as-is:
+
+```python
+from src.monitoring.location_queries import tools_schema, call_tool
+
+tools_schema()          # OpenAI-compatible function definitions, ready to register
+call_tool("zone_stay", {"zones": ["sink"], "cat": "kurumi", "since": "2026-10-01"})
+# -> {"ok": True, "tool": "zone_stay", "result": {"count": 3, "total_minutes": 3.8, ...}}
+```
+
+Everything in the module is one dictionary in, one dictionary out, JSON-serializable
+both ways, deterministic, and free of any LLM, network or clock dependency (`now` is
+injectable). `call_tool` never raises: an unknown tool or bad arguments come back as
+`{"ok": False, "error": ...}` for the model to read. Adding a tool means writing one
+function with keyword arguments and adding one `Tool` entry - the schema, the
+`call_tool` dispatch and the harness integration need no changes.
+
+The tools are `zone_stay` (how often and how long in given zones), `zone_totals` (time
+per zone over a range, for cross-day questions) and `daily_summary` (the report's own
+summary and its meal/drink/toilet verdicts).
+
 ### 10. Run it 24/7
 
 `deploy/systemd/` holds five units: `cat-tracker.service` runs the recorder with
@@ -488,6 +547,8 @@ After editing a unit file, `systemctl --user daemon-reload` then restart. Editin
 | `tracking` | Sample interval, confidence, `imgsz`, switch hysteresis, timeouts, database |
 | `alignment` | ORB matching thresholds and the trust-last-good window |
 | `report` | Timezone, language, delivery mode, and the LLM settings |
+| `report.zone_aliases` | Zone identifier → the words the owner uses for it (the shared vocabulary) |
+| `report.query` | Limits for the code-computed answers (`max_stays`, `max_days`) |
 | `discord_bot` | Bot token, channel/user allowlists, trigger words, default day |
 | `discord_bot.snapshot` | Picture-request words, camera aliases, image size, how long a stream is held |
 
@@ -523,9 +584,10 @@ and handed to the model as an already-decided `events` array.
 ```
 
 `tests/` covers alignment, zone lookup, tracking, the web UI's embedded
-JavaScript, the report's prompt assembly and delivery, camera discovery, and the
+JavaScript, the report's prompt assembly and delivery, camera discovery, the
 Discord bot's decision rules (which messages to answer, which day they mean, what
-to reply).
+to reply), and the zone questions - which are answered without a camera, a network
+or an LLM: the database is a throwaway file and the clock is injected.
 Nothing in `tests/test_camera_discovery.py` touches a network or a camera: the
 scan, the stream open and the picture match are injected, so the rules that cost
 real debugging - which signal decides identity, and what to do when the evidence

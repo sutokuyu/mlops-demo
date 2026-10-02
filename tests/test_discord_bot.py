@@ -370,7 +370,7 @@ def test_the_reply_is_the_days_summary(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None: f"喵：{summary['date']}",
+        lambda summary, temperature=None, question=None, query=None: f"喵：{summary['date']}",
     )
 
     reply = build_reply("报告", settings=settings(), database=database_with_a_visit(tmp_path))
@@ -380,8 +380,9 @@ def test_the_reply_is_the_days_summary(monkeypatch, tmp_path: Path) -> None:
 def test_the_question_reaches_the_model(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 
-    def fake_call_llm(summary, temperature=None, question=None):
+    def fake_call_llm(summary, temperature=None, question=None, query=None):
         captured["question"] = question
+        captured["query"] = query
         return "喵"
 
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
@@ -393,6 +394,9 @@ def test_the_question_reaches_the_model(monkeypatch, tmp_path: Path) -> None:
         database=database_with_a_visit(tmp_path),
     )
     assert captured["question"] == "kurumi 今天在哪待得最久？"
+    # The question names no place, so nothing was counted in code and the model gets no
+    # computed answer to lean on - the same behaviour as before this existed.
+    assert captured["query"] is None
 
 
 def test_asking_for_yesterday_reads_yesterday(monkeypatch, tmp_path: Path) -> None:
@@ -401,7 +405,7 @@ def test_asking_for_yesterday_reads_yesterday(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None: f"喵：{summary['date']}",
+        lambda summary, temperature=None, question=None, query=None: f"喵：{summary['date']}",
     )
 
     reply = build_reply(
@@ -418,7 +422,7 @@ def test_a_failing_llm_still_sends_the_numbers(monkeypatch, tmp_path: Path) -> N
     it is a better answer than an apology.
     """
 
-    def explode(summary, temperature=None, question=None):
+    def explode(summary, temperature=None, question=None, query=None):
         raise location_report.DeliveryError("502 Bad Gateway: upstream is sad")
 
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
@@ -447,7 +451,7 @@ def test_a_reply_is_never_longer_than_discord_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None: "长" * 5000,
+        lambda summary, temperature=None, question=None, query=None: "长" * 5000,
     )
 
     reply = build_reply("报告", settings=settings(), database=database_with_a_visit(tmp_path))
@@ -866,3 +870,74 @@ def test_the_snapshot_block_is_read_from_the_config(monkeypatch) -> None:
     assert configured.snapshot.triggers == ("喵一张",)
     assert configured.snapshot.aliases["喵"] == "feeder"
     assert configured.snapshot.max_width == 640
+
+
+# --- questions that name a place get counted in code -----------------------
+#
+# Measured 2026-10-02: "kurumi 有没有进过水池" was answered "数据里没这个记录" while the
+# database held four `sink` stays that day. The counting now happens in
+# location_queries and rides along as a `query` field the model must answer from.
+
+
+def database_with_a_sink(tmp_path: Path, cat: str = "kurumi") -> Path:
+    """One two-minute stay in the sink, on the day being asked about."""
+    tz = ZoneInfo(location_report.REPORT_CONFIG["timezone"])
+    start_ts, _ = location_report.day_bounds(discord_bot.target_day(0), tz)
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    visit_id = store.open_visit(start_ts + 3600, cat, "living_room", "sink", 0.9)
+    store.touch_visit(visit_id, start_ts + 3720, 3, 0.9)
+    store.close()
+    return database
+
+
+def test_a_place_question_is_counted_from_the_database(tmp_path: Path) -> None:
+    """The regression, end to end through the bot's own router."""
+    verdict = discord_bot.answer_from_the_data(
+        "kurumi 有没有进过水池", database=database_with_a_sink(tmp_path)
+    )
+    assert verdict is not None
+    assert verdict["zones"] == ["sink"]
+    assert verdict["count"] == 1
+    assert verdict["stays"][0]["camera"] == "living_room"
+
+
+def test_the_verdict_reaches_the_model_with_the_question(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    def fake_call_llm(summary, temperature=None, question=None, query=None):
+        captured["question"] = question
+        captured["query"] = query
+        return "喵"
+
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
+    monkeypatch.setattr(location_report, "call_llm", fake_call_llm)
+
+    reply = build_reply(
+        "kurumi 有没有进过水池",
+        settings=settings(),
+        database=database_with_a_sink(tmp_path),
+    )
+
+    assert reply == "喵"
+    assert captured["question"] == "kurumi 有没有进过水池"
+    assert captured["query"]["count"] == 1
+    assert captured["query"]["tool"] == "zone_stay"
+
+
+def test_a_broken_query_still_sends_the_report(monkeypatch, tmp_path: Path) -> None:
+    """Same trade as everywhere else: losing a warning is worse than losing the phrasing."""
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
+    monkeypatch.setattr(location_report, "call_llm", lambda *a, **k: "喵")
+    monkeypatch.setattr(discord_bot, "answer_question", explode)
+
+    reply = build_reply(
+        "kurumi 有没有进过水池",
+        settings=settings(),
+        database=database_with_a_sink(tmp_path),
+    )
+    assert reply == "喵"

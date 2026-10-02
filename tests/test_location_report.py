@@ -24,8 +24,10 @@ from src.monitoring.location_report import (
     MAX_REPORT_CHARACTERS,
     NEUTRAL_PERSONA,
     PRESENTATION,
+    QUERY,
     QUESTION,
     TASK,
+    VOCABULARY,
     DeliveryError,
     build_instruction,
     build_summary,
@@ -308,7 +310,9 @@ def test_call_llm_puts_the_question_in_the_instruction(monkeypatch) -> None:
 def test_compose_returns_the_llm_narrative_in_llm_mode(monkeypatch) -> None:
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
     monkeypatch.setattr(
-        location_report, "call_llm", lambda summary, temperature=None, question=None: "喵喵喵"
+        location_report,
+        "call_llm",
+        lambda summary, temperature=None, question=None, query=None: "喵喵喵",
     )
     assert location_report.compose({"cats": []}, "plain text") == "喵喵喵"
 
@@ -318,7 +322,9 @@ def test_compose_returns_the_plain_text_in_discord_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None: pytest.fail("the LLM must not be called"),
+        lambda summary, temperature=None, question=None, query=None: pytest.fail(
+            "the LLM must not be called"
+        ),
     )
     assert location_report.compose({"cats": []}, "plain text") == "plain text"
 
@@ -327,7 +333,9 @@ def test_dry_run_posts_nothing(monkeypatch, capsys) -> None:
     """--dry-run is how the persona gets tuned without spamming Discord."""
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
     monkeypatch.setattr(
-        location_report, "call_llm", lambda summary, temperature=None, question=None: "喵"
+        location_report,
+        "call_llm",
+        lambda summary, temperature=None, question=None, query=None: "喵",
     )
     monkeypatch.setattr(
         location_report,
@@ -835,3 +843,86 @@ def test_build_summary_finds_a_visit_that_never_became_a_zone(tmp_path: Path) ->
     # The floor row stays: the classifier's answer is not rewritten, the verdict is
     # added next to it.
     assert kurumi["locations"] == [{"location": "floor", "minutes": 0.1}]
+
+
+# --- the vocabulary, and the code-computed answer to a question -------------
+#
+# Measured 2026-10-02: "猫有没有进过水池" was answered "数据里没这个记录" while the
+# database held four `sink` stays that day. One cause was that the owner's word and the
+# stored identifier were never tied together, so the prompt gets the mapping; the other
+# was that the counting was left to the model, so a question that names a place gets a
+# computed answer instead.
+
+
+def test_the_prompt_carries_the_zone_vocabulary() -> None:
+    instruction = build_instruction("zh")
+    assert "sink = 水池/水槽" in instruction
+    assert VOCABULARY.split("{")[0].strip() in instruction
+
+
+def test_the_vocabulary_can_be_given_explicitly() -> None:
+    assert "sink = 洗手台" in build_instruction("zh", vocabulary="sink = 洗手台")
+    assert "sink = 水池" not in build_instruction("zh", vocabulary="sink = 洗手台")
+    # An empty vocabulary drops the block rather than leaving a dangling header.
+    assert "the words the owner uses for it" not in build_instruction("zh", vocabulary="  ")
+
+
+def test_the_query_block_only_appears_with_a_computed_answer() -> None:
+    assert QUERY not in build_instruction("zh")
+    instruction = build_instruction("zh", query={"count": 3})
+    assert QUERY in instruction
+    assert instruction.rstrip().endswith(GROUNDING_RULES)
+
+
+def test_the_query_block_forbids_explaining_a_zero_away() -> None:
+    """The observed failure was not only a miss but a manufactured pass-by."""
+    instruction = build_instruction("zh", query={"count": 0})
+    assert "no such record" in QUERY
+    assert QUERY in instruction
+
+
+def test_call_llm_attaches_the_computed_answer_to_the_data(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    verdict = {"tool": "zone_stay", "zones": ["sink"], "count": 3}
+    call_llm({"cats": []}, question="进过水池吗", query=verdict)
+
+    instruction = captured["body"]["messages"][0]["content"]
+    assert QUERY in instruction
+    assert instruction.rstrip().endswith(GROUNDING_RULES)
+    # The answer rides in the data, and the owner's question still does not.
+    user_message = json.loads(captured["body"]["messages"][1]["content"])
+    assert user_message["query"] == verdict
+    assert user_message["cats"] == []
+    assert "进过水池吗" not in captured["body"]["messages"][1]["content"]
+
+
+def test_without_an_answer_the_data_is_unchanged(monkeypatch) -> None:
+    """The daily report's payload has to stay byte-identical."""
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    call_llm({"cats": []})
+    assert captured["body"]["messages"][1]["content"] == '{"cats": []}'
+    assert QUERY not in captured["body"]["messages"][0]["content"]

@@ -45,6 +45,7 @@ from src.monitoring.location_config import (
     REPORT_CONFIG,
     configured_cameras,
 )
+from src.monitoring.location_queries import answer_question
 from src.monitoring.location_report import (
     DISCORD_MESSAGE_LIMIT,
     MAX_QUESTION_CHARACTERS,
@@ -314,6 +315,30 @@ def format_failure(day: date, error: Exception) -> str:
     )
 
 
+def answer_from_the_data(
+    content: str, *, database: Path | None = None, now: datetime | None = None
+) -> dict | None:
+    """A code-computed answer when the question names a place, else ``None``.
+
+    The counting has to happen in code, not in the model. Measured 2026-10-02: asked
+    "猫有没有进过水池" the bot answered "数据里没这个记录" while the database held four
+    ``sink`` stays that day - a question that names a place and asks whether the cat was
+    there is exactly what a text timeline cannot be trusted with.
+
+    Best-effort on purpose: a question with no place in it returns ``None`` (the daily
+    report path then behaves exactly as before), and a query that cannot run must not
+    cost the owner the whole reply, so it degrades the same way an unreadable day does.
+    """
+    try:
+        return answer_question(content, database=database, now=now)
+    except (*REPORT_ERRORS, ValueError) as error:
+        print(
+            f"discord_bot: could not answer {content[:40]!r} from the data: {error}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def build_reply(
     content: str,
     *,
@@ -344,12 +369,16 @@ def build_reply(
         return format_failure(day, error)
 
     text = render_text(summary)
+    verdict = answer_from_the_data(
+        content, database=database if database is not None else settings.database
+    )
     try:
         narrative = compose(
             summary,
             text,
             temperature if temperature is not None else settings.temperature,
             question,
+            verdict,
         )
     except REPORT_ERRORS as error:
         print(
