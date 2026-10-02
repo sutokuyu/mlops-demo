@@ -95,6 +95,11 @@ class Observation:
     box: tuple[float, float, float, float] | None = None
     # (points that agreed, points sampled) - 9/9 is confident, 5/9 is not.
     vote: tuple[int, int] | None = None
+    # The anchor in the camera's own frame, before alignment, so "who was near this
+    # spot" can be asked with the coordinates the owner reads off the screen.
+    camera_anchor: tuple[float, float] | None = None
+    # (width, height) in pixels, to turn those fractions into pixels and back.
+    frame_size: tuple[int, int] | None = None
 
 
 @dataclass
@@ -228,6 +233,8 @@ def sample_cameras(trackers: list[CameraTracker], model, args) -> list[Observati
                 box[3] / image_height,
             )
             norm_x, norm_y = anchor_x / image_width, anchor_y / image_height
+            # Kept before the alignment transform below overwrites norm_x/norm_y.
+            camera_point = (norm_x, norm_y)
             candidates = [
                 (x / image_width, y / image_height) for x, y in anchor_points(box, strategy, grid)
             ]
@@ -249,6 +256,8 @@ def sample_cameras(trackers: list[CameraTracker], model, args) -> list[Observati
                     alignment_quality=state.quality if state is not None else None,
                     box=normal_box,
                     vote=(vote.matches, vote.samples),
+                    camera_anchor=camera_point,
+                    frame_size=(image_width, image_height),
                 )
             )
     return observations
@@ -314,6 +323,8 @@ def apply_observations(
             observation.alignment_quality,
             observation.box,
             observation.vote,
+            observation.camera_anchor,
+            observation.frame_size,
         )
         key = (observation.camera, observation.zone)
 

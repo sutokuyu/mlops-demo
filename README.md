@@ -260,8 +260,11 @@ python src/execute_location_tracker.py --camera sofa          # one camera, for 
 ```
 
 It samples every `tracking.sample_interval_seconds`, resolves each cat to a zone,
-and writes observations plus dwell visits to `data/location_history.db`. A zone
-change is only accepted after `tracking.switch_min_samples` consecutive samples,
+and writes observations plus dwell visits to `data/location_history.db`. Each
+observation keeps the anchor twice: `norm_x`/`norm_y` in the reference frame the
+zones were drawn on (for zone lookup), and `cam_x`/`cam_y` in the camera's own frame
+plus `frame_width`/`frame_height` (for pointing at a spot on the live picture). A
+zone change is only accepted after `tracking.switch_min_samples` consecutive samples,
 and a visit is closed after `tracking.missing_timeout_seconds` without a
 detection. When alignment quality is too poor, the sample is stored with
 `zone = NULL` instead of guessing.
@@ -493,8 +496,33 @@ function with keyword arguments and adding one `Tool` entry - the schema, the
 `call_tool` dispatch and the harness integration need no changes.
 
 The tools are `zone_stay` (how often and how long in given zones), `zone_totals` (time
-per zone over a range, for cross-day questions) and `daily_summary` (the report's own
-summary and its meal/drink/toilet verdicts).
+per zone over a range, for cross-day questions), `daily_summary` (the report's own
+summary and its meal/drink/toilet verdicts) and `point_stay` (who stayed near a
+specific spot on one camera).
+
+#### Asking about a spot, not a zone
+
+A zone like `floor` is far too coarse to say *where* on the floor something happened.
+`point_stay` takes a camera and an `x`/`y` - fractions of the frame (0..1) by default,
+or pixels with `unit="pixel"` - and returns, per cat, the minutes spent within `radius`
+of that point, with the individual stays:
+
+```python
+call_tool("point_stay", {"camera": "living_room", "x": 0.6, "y": 0.5})
+# -> {"ok": True, "result": {"minutes_by_cat": {"kurumi": 4.0}, "stays": [...], ...}}
+```
+
+A coordinate only means something on one camera, so `camera` is required and the same
+numbers are a different place on another camera. Consecutive samples inside the radius
+and no more than `report.query.point_gap_seconds` apart count as one stay, which is
+what separates a cat that *stayed* there from one walking through - sort by the minutes
+to tell them apart. Rows written before `cam_x`/`cam_y` existed fall back to the stored
+detection box (its bottom centre is the same anchor), so the whole history is
+queryable without a backfill.
+
+The bot understands this too: a message naming a coordinate (`客厅地板上 (0.6, 0.5)`)
+is answered from `point_stay`, via `report.camera_aliases` (客厅 = `living_room`). When
+a coordinate is given without a camera the bot asks which one rather than guessing.
 
 ### 10. Run it 24/7
 

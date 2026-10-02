@@ -401,6 +401,23 @@ def test_zone_is_optional_and_falls_back_to_the_camera_name(store) -> None:
     assert visit.location == "living_room"
 
 
+def test_the_camera_frame_point_is_recorded_with_the_observation(store) -> None:
+    """Beside the zone label, so "who was near this spot" survives a re-draw."""
+    active: dict = {}
+    observation = location_tracker.Observation(
+        "bagel",
+        "living_room",
+        "floor",
+        0.8,
+        camera_anchor=(0.42, 0.73),
+        frame_size=(1600, 900),
+    )
+    location_tracker.apply_observations(store, active, {"bagel": observation}, DAY_START)
+    row = store.observations_between(DAY_START - 1, DAY_START + 1)[0]
+    assert row.camera_anchor == pytest.approx((0.42, 0.73))
+    assert (row.frame_width, row.frame_height) == (1600, 900)
+
+
 def test_daily_summary_aggregates_and_sorts_dwell_time(store, monkeypatch) -> None:
     location_report.TRACKING_CONFIG["database"] = str(store.path)
     monkeypatch.setattr(location_report, "resolve_config_path", lambda value: Path(value))

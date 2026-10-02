@@ -171,9 +171,14 @@ QUERY = (
     "`query` in the data is the answer to the owner's question, computed in code from the "
     "same database; it names the range it covers and its counts, times and cameras are "
     "exact. Answer from it first and quote its numbers. Do not recount the question from "
-    "`timeline`, and when its `count` is 0 the answer is that there is no such record in "
-    "that range - say exactly that, and do not add a pass-by or any other conclusion the "
-    "data does not contain."
+    "`timeline`, and when its `count` is 0 (or, for a question about a coordinate, its "
+    "`found` is false) the answer is that there is no such record in that range - say "
+    "exactly that, and do not add a pass-by or any other conclusion the data does not "
+    "contain. When `needs_camera` is true the question named a coordinate without saying "
+    "which camera: ask which one, offering `camera_candidates`, because the same numbers "
+    "are a different place on a different camera. A coordinate answer's `stays` and "
+    "`minutes_by_cat` are already the answer to 'which cat was there, and for how long' - "
+    "rank the cats by the minutes given, do not compare coordinates yourself."
 )
 
 # Deliberately not configurable. Models happily invent a plausible day when a

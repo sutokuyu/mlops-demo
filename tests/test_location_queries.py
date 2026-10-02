@@ -11,6 +11,7 @@ the clock is injected.
 """
 
 import json
+import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -51,6 +52,29 @@ def seed(database: Path, rows: list[tuple[date, int, str, str, str, float]]) -> 
         start_ts = day_start(day) + minute * 60
         visit_id = store.open_visit(start_ts, cat, camera, zone, 0.9)
         store.touch_visit(visit_id, start_ts + minutes * 60, 3, 0.9)
+    store.close()
+    return database
+
+
+def seed_observations(
+    database: Path,
+    rows: list[tuple[int, str, str, float, float]],
+    *,
+    frame: tuple[int, int] = (1600, 900),
+    day: date = date(2026, 10, 3),
+) -> Path:
+    """``(minute-of-day, cat, camera, x, y)`` -> an observation with a camera anchor."""
+    store = LocationStore(database)
+    for minute, cat, camera, x, y in rows:
+        store.record_observation(
+            day_start(day) + minute * 60,
+            cat,
+            camera,
+            None,
+            0.9,
+            camera_point=(x, y),
+            frame_size=frame,
+        )
     store.close()
     return database
 
@@ -400,3 +424,220 @@ def test_a_group_question_counts_both_zones_and_still_says_which(tmp_path: Path)
     only_two = queries.answer_question("kurumi 去过湿粮碗2吗", database=database, now=NOW)
     assert only_two["count"] == 1
     assert only_two["counts_by_zone"] == {"wet_food_bowl_2": 1}
+
+
+# --- points: "who was near this spot" --------------------------------------
+#
+# The floor zone is far too coarse to point at a spot on it. These cover the answer to
+# "哪只猫在地板 (x, y) 处待得比较久" - the coordinate the owner reads off the live
+# picture, not a zone name.
+
+
+def test_an_observation_keeps_the_point_in_the_camera_frame(tmp_path: Path) -> None:
+    database = seed_observations(tmp_path / "history.db", [(60, "kurumi", "living_room", 0.4, 0.7)])
+    store = LocationStore(database)
+    try:
+        row = store.observations_between(0, day_start(date(2026, 10, 4)))[0]
+    finally:
+        store.close()
+    assert row.cam_x == pytest.approx(0.4)
+    assert row.cam_y == pytest.approx(0.7)
+    assert row.camera_anchor == pytest.approx((0.4, 0.7))
+    assert (row.frame_width, row.frame_height) == (1600, 900)
+
+
+def test_a_row_with_only_a_box_still_yields_a_camera_anchor(tmp_path: Path) -> None:
+    """Old rows predate cam_x/cam_y, but the box is stored untransformed, so it recovers."""
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    store.record_observation(
+        day_start(date(2026, 10, 3)) + 60,
+        "bagel",
+        "sofa",
+        "floor",
+        0.9,
+        box=(0.1, 0.2, 0.5, 0.8),
+    )
+    store.close()
+
+    store = LocationStore(database)
+    try:
+        row = store.observations_between(0, day_start(date(2026, 10, 4)))[0]
+    finally:
+        store.close()
+    assert row.cam_x is None
+    assert row.camera_anchor == pytest.approx((0.3, 0.8))
+
+
+def test_the_store_migrates_a_database_that_lacks_the_camera_columns(tmp_path: Path) -> None:
+    database = tmp_path / "old.db"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
+        " cat TEXT NOT NULL, camera TEXT NOT NULL, zone TEXT, confidence REAL NOT NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    store = LocationStore(database)
+    try:
+        columns = {row[1] for row in store._connection.execute("PRAGMA table_info(observations)")}
+    finally:
+        store.close()
+    assert {"cam_x", "cam_y", "frame_width", "frame_height"} <= columns
+
+
+def test_point_stay_ranks_the_cat_that_stayed_longest(tmp_path: Path) -> None:
+    rows = [
+        (0, "kurumi", "living_room", 0.50, 0.50),
+        (1, "kurumi", "living_room", 0.51, 0.50),
+        (2, "kurumi", "living_room", 0.50, 0.49),
+        (3, "kurumi", "living_room", 0.52, 0.51),
+        (4, "kurumi", "living_room", 0.50, 0.50),
+        (10, "bagel", "living_room", 0.50, 0.50),
+        (11, "bagel", "living_room", 0.49, 0.50),
+    ]
+    database = seed_observations(tmp_path / "history.db", rows)
+    result = queries.point_stay(
+        camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
+    )
+    assert result["found"] is True
+    assert result["minutes_by_cat"] == {"kurumi": 4.0, "bagel": 1.0}
+    assert result["total_minutes"] == pytest.approx(5.0)
+    assert result["stays"][0]["cat"] == "kurumi"
+    assert result["stays"][0]["samples"] == 5
+
+
+def test_point_stay_excludes_a_cat_elsewhere_on_the_same_camera(tmp_path: Path) -> None:
+    rows = [
+        (0, "kurumi", "living_room", 0.50, 0.50),
+        (1, "kurumi", "living_room", 0.50, 0.50),
+        (2, "bagel", "living_room", 0.10, 0.10),
+    ]
+    database = seed_observations(tmp_path / "history.db", rows)
+    result = queries.point_stay(
+        camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
+    )
+    assert result["minutes_by_cat"] == {"kurumi": 1.0}
+    assert "bagel" not in result["samples_by_cat"]
+
+
+def test_a_long_gap_splits_one_cat_into_two_stays(tmp_path: Path) -> None:
+    rows = [
+        (0, "kurumi", "living_room", 0.50, 0.50),
+        (1, "kurumi", "living_room", 0.50, 0.50),
+        (30, "kurumi", "living_room", 0.50, 0.50),
+        (31, "kurumi", "living_room", 0.50, 0.50),
+    ]
+    database = seed_observations(tmp_path / "history.db", rows)
+    result = queries.point_stay(
+        camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
+    )
+    assert [stay["minutes"] for stay in result["stays"]] == [1.0, 1.0]
+    assert result["samples_by_cat"] == {"kurumi": 4}
+
+
+def test_point_stay_reads_pixel_coordinates_against_the_frame_size(tmp_path: Path) -> None:
+    database = seed_observations(tmp_path / "history.db", [(3, "kurumi", "living_room", 0.5, 0.5)])
+    result = queries.point_stay(
+        camera="living_room",
+        x=800,
+        y=450,
+        radius=160,
+        unit="pixel",
+        since="2026-10-03",
+        database=database,
+        now=NOW,
+    )
+    assert result["found"] is True
+    assert result["point"]["x"] == pytest.approx(0.5)
+    assert result["point"]["y"] == pytest.approx(0.5)
+    assert result["point"]["pixels"] == [800, 450]
+
+
+def test_point_stay_refuses_pixels_without_a_frame_size(tmp_path: Path) -> None:
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    store.record_observation(day_start(date(2026, 10, 3)) + 180, "kurumi", "living_room", None, 0.9)
+    store.close()
+    with pytest.raises(ValueError, match="frame size"):
+        queries.point_stay(
+            camera="living_room",
+            x=800,
+            y=450,
+            unit="pixel",
+            since="2026-10-03",
+            database=database,
+            now=NOW,
+        )
+
+
+def test_point_stay_needs_a_camera() -> None:
+    with pytest.raises(ValueError, match="camera is required"):
+        queries.point_stay_between(0, 1, camera="", x=0.5, y=0.5)
+
+
+# --- reading a coordinate out of a question --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "x", "y", "unit"),
+    [
+        ("地板上 x=1200 y=800 谁待得久", 1200.0, 800.0, "pixel"),
+        ("客厅坐标 0.6 0.5 那里", 0.6, 0.5, "normalized"),
+        ("客厅地板上 (0.6, 0.5)", 0.6, 0.5, "normalized"),
+        ("sofa (1200,800)", 1200.0, 800.0, "pixel"),
+    ],
+)
+def test_a_point_can_be_read_from_a_question(text: str, x: float, y: float, unit: str) -> None:
+    point = queries.parse_point(text)
+    assert point is not None
+    assert (point["x"], point["y"], point["unit"]) == (x, y, unit)
+
+
+def test_a_question_without_a_coordinate_has_no_point() -> None:
+    assert queries.parse_point("今天两只猫都做什么了") is None
+    assert queries.parse_point("2026-10-03 的报告") is None
+
+
+def test_a_coordinate_question_is_answered_from_the_data(tmp_path: Path) -> None:
+    rows = [
+        (0, "kurumi", "living_room", 0.50, 0.50),
+        (1, "kurumi", "living_room", 0.50, 0.50),
+        (2, "bagel", "living_room", 0.50, 0.50),
+    ]
+    database = seed_observations(tmp_path / "history.db", rows)
+    verdict = queries.answer_question(
+        "客厅地板上 (0.50, 0.50) 哪只猫待得久", database=database, now=NOW
+    )
+    assert verdict is not None
+    assert verdict["tool"] == "point_stay"
+    assert verdict["camera"] == "living_room"
+    assert verdict["stays"][0]["cat"] == "kurumi"
+    assert verdict["range"]["label"] == "2026-10-03"
+
+
+def test_a_coordinate_question_without_a_camera_asks_which_one(tmp_path: Path) -> None:
+    """The same numbers are a different place on another camera, so do not guess."""
+    database = seed_observations(tmp_path / "history.db", [(0, "kurumi", "living_room", 0.5, 0.5)])
+    verdict = queries.answer_question(
+        "地板上 (0.50, 0.50) 哪只猫待得久", database=database, now=NOW
+    )
+    assert verdict["tool"] == "point_stay"
+    assert verdict["needs_camera"] is True
+    assert verdict["found"] is False
+    assert "living_room" in verdict["camera_candidates"]
+
+
+def test_the_point_tool_is_registered_and_dispatchable(tmp_path: Path) -> None:
+    database = seed_observations(tmp_path / "history.db", [(0, "kurumi", "living_room", 0.5, 0.5)])
+    names = {tool["function"]["name"] for tool in queries.tools_schema()}
+    assert "point_stay" in names
+    reply = queries.call_tool(
+        "point_stay",
+        {"camera": "living_room", "x": 0.5, "y": 0.5, "since": "2026-10-03"},
+        database=database,
+        now=NOW,
+    )
+    assert reply["ok"] is True
+    assert reply["result"]["camera"] == "living_room"

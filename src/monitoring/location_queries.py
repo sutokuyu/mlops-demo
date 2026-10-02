@@ -26,10 +26,16 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from math import hypot
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.monitoring.location_config import IDENTITY_CLASSES, REPORT_CONFIG, location_database
+from src.monitoring.location_config import (
+    IDENTITY_CLASSES,
+    REPORT_CONFIG,
+    configured_cameras,
+    location_database,
+)
 from src.monitoring.location_report import build_summary, day_bounds
 from src.monitoring.location_store import LocationStore
 from src.monitoring.zone_vocabulary import known_zones, resolve_zones
@@ -37,6 +43,20 @@ from src.monitoring.zone_vocabulary import known_zones, resolve_zones
 DEFAULT_MAX_DAYS = 31
 DEFAULT_MAX_STAYS = 20
 DEFAULT_TOP_ZONES = 10
+# A "near this spot" question is asked about a spot the owner is looking at, so the
+# default radius is a fraction of the frame wide enough to cover a cat's body, and a
+# gap of a minute splits one visit from the next.
+DEFAULT_POINT_RADIUS = 0.05
+DEFAULT_POINT_GAP_SECONDS = 60.0
+
+# What each camera is called in ordinary speech, next to its identifier. Kept short on
+# purpose: a coordinate only means something on one camera, so a point question has to
+# name the camera, and the owner says 客厅 rather than living_room.
+DEFAULT_CAMERA_ALIASES: dict[str, list[str]] = {
+    "living_room": ["客厅", "起居室"],
+    "sofa": ["沙发"],
+    "feeder": ["喂食器", "厨房"],
+}
 
 # See discord_bot.DAY_BEFORE_YESTERDAY_WORDS / YESTERDAY_WORDS: the same phrases, kept
 # here so a question's range and its report day cannot drift apart (a test compares them).
@@ -71,6 +91,8 @@ def query_limits() -> dict:
         "max_days": int(raw.get("max_days", DEFAULT_MAX_DAYS)),
         "max_stays": int(raw.get("max_stays", DEFAULT_MAX_STAYS)),
         "top_zones": int(raw.get("top_zones", DEFAULT_TOP_ZONES)),
+        "point_radius": float(raw.get("point_radius", DEFAULT_POINT_RADIUS)),
+        "point_gap_seconds": float(raw.get("point_gap_seconds", DEFAULT_POINT_GAP_SECONDS)),
     }
 
 
@@ -88,6 +110,42 @@ def resolve_cats(text: str, *, cats: Sequence[str] | None = None) -> list[str]:
     """Every cat named in the text. No name at all means "not narrowed to one cat"."""
     lowered = text.lower()
     return [cat for cat in (cats or known_cats()) if cat.lower() in lowered]
+
+
+# --- cameras ---------------------------------------------------------------
+#
+# A coordinate exists only on one camera: (0.6, 0.5) is the sink on living_room and a
+# cushion on sofa. So a point question must say which camera, which is why cameras get
+# the same owner-word treatment as zones.
+
+
+def camera_aliases(config: Mapping | None = None) -> dict[str, list[str]]:
+    """Camera identifier -> the words that may refer to it."""
+    raw = (config if config is not None else REPORT_CONFIG.get("camera_aliases")) or {}
+    merged = {camera: list(words) for camera, words in DEFAULT_CAMERA_ALIASES.items()}
+    for camera, words in raw.items():
+        merged[str(camera)] = _as_list(words)
+    return merged
+
+
+def resolve_cameras(text: str, *, cameras: Sequence[str] | None = None) -> list[str]:
+    """Every camera the text names, by identifier or by one of its words.
+
+    Deliberately does not guess: no camera named returns an empty list, and the caller
+    asks which one rather than combining coordinates from two rooms.
+    """
+    available = list(cameras if cameras is not None else configured_cameras())
+    lowered = text.lower()
+    found: list[str] = []
+    for camera, words in camera_aliases().items():
+        if camera not in available:
+            continue
+        if re.search(rf"(?<![a-z0-9_]){re.escape(camera)}(?![a-z0-9_])", lowered):
+            found.append(camera)
+            continue
+        if any(word.lower() in lowered for word in words):
+            found.append(camera)
+    return found
 
 
 # --- ranges ----------------------------------------------------------------
@@ -374,6 +432,198 @@ def zone_totals(
     }
 
 
+def _frame_size(rows: Iterable) -> tuple[int, int] | None:
+    """The most common (width, height) among rows that recorded one.
+
+    A camera's frame size is a property of the camera, so the mode is a safe answer even
+    if a resolution was changed mid-history.
+    """
+    counts: dict[tuple[int, int], int] = {}
+    for row in rows:
+        if row.frame_width and row.frame_height:
+            key = (int(row.frame_width), int(row.frame_height))
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _finish_point_stay(camera: str, cat: str, first: float, last: float, samples: int) -> dict:
+    tz = report_timezone()
+    return {
+        "cat": cat,
+        "camera": camera,
+        "start": _format_time(first, tz),
+        "end": _format_time(last, tz),
+        "minutes": round(max(0.0, last - first) / 60, 1),
+        "samples": samples,
+    }
+
+
+def point_stay_between(
+    start_ts: float,
+    end_ts: float,
+    *,
+    camera: str,
+    x: float,
+    y: float,
+    radius: float | None = None,
+    unit: str = "normalized",
+    cat: str | None = None,
+    database: Path | None = None,
+    max_stays: int | None = None,
+) -> dict:
+    """Who stayed near a point on one camera, over an explicit range.
+
+    The point is matched against the anchor in the camera's own frame, so the coordinate
+    the owner points at on the live picture - the spot on the floor where the cat was
+    sick, say - can be looked up without knowing anything about alignment. A cat counts
+    only while consecutive samples stay inside ``radius`` and no more than
+    ``point_gap_seconds`` apart; everything else is someone walking through, and sorting
+    the result by minutes is what separates the two.
+    """
+    limits = query_limits()
+    if not camera:
+        raise ValueError("a camera is required; a coordinate only means something on one camera")
+    if x is None or y is None:
+        raise ValueError("both x and y are required")
+
+    keep = float(radius) if radius is not None else limits["point_radius"]
+    want_pixel = str(unit).lower().startswith("pixel")
+
+    store = LocationStore(database or location_database())
+    try:
+        rows = [row for row in store.observations_between(start_ts, end_ts) if row.camera == camera]
+    finally:
+        store.close()
+
+    frame = _frame_size(rows)
+    if want_pixel:
+        if frame is None:
+            raise ValueError(
+                f"no frame size recorded for {camera}; give x/y as fractions 0..1 instead"
+            )
+        width, height = frame
+        qx, qy = float(x) / width, float(y) / height
+        radius_norm = keep / width
+    else:
+        qx, qy = float(x), float(y)
+        radius_norm = keep
+
+    if frame is not None:
+        width, height = frame
+        threshold = radius_norm * width
+
+        def distance(ax: float, ay: float) -> float:
+            # Pixels, so the x and y axes are comparable on a 16:9 frame.
+            return hypot((ax - qx) * width, (ay - qy) * height)
+
+    else:
+        threshold = radius_norm
+
+        def distance(ax: float, ay: float) -> float:
+            return hypot(ax - qx, ay - qy)
+
+    matched: dict[str, list] = {}
+    for row in rows:
+        if cat is not None and row.cat != cat:
+            continue
+        anchor = row.camera_anchor
+        if anchor is None:
+            continue
+        if distance(*anchor) <= threshold:
+            matched.setdefault(row.cat, []).append(row)
+
+    gap = limits["point_gap_seconds"]
+    limit = limits["max_stays"] if max_stays is None else int(max_stays)
+    stays: list[dict] = []
+    samples_by_cat: dict[str, int] = {}
+    for cat_name, cat_rows in matched.items():
+        samples_by_cat[cat_name] = len(cat_rows)
+        current: dict | None = None
+        for row in cat_rows:  # observations_between orders by ts
+            if current is not None and row.ts - current["last"] <= gap:
+                current["last"] = row.ts
+                current["samples"] += 1
+            else:
+                if current is not None:
+                    stays.append(
+                        _finish_point_stay(
+                            camera, cat_name, current["first"], current["last"], current["samples"]
+                        )
+                    )
+                current = {"first": row.ts, "last": row.ts, "samples": 1}
+        if current is not None:
+            stays.append(
+                _finish_point_stay(
+                    camera, cat_name, current["first"], current["last"], current["samples"]
+                )
+            )
+
+    stays.sort(key=lambda item: (-item["minutes"], item["cat"], item["start"]))
+    minutes_by_cat: dict[str, float] = {}
+    for stay in stays:
+        minutes_by_cat[stay["cat"]] = round(
+            minutes_by_cat.get(stay["cat"], 0.0) + stay["minutes"], 1
+        )
+
+    point = {"x": round(qx, 5), "y": round(qy, 5), "unit": "normalized"}
+    if frame is not None:
+        point["pixels"] = [round(qx * frame[0]), round(qy * frame[1])]
+    answer = {
+        "camera": camera,
+        "point": point,
+        "radius": round(radius_norm, 5),
+        "cat": cat or "all",
+        "found": bool(stays),
+        "stays": stays[: max(0, limit)],
+        "truncated": len(stays) > limit,
+        "max_stays": limit,
+        "samples_by_cat": samples_by_cat,
+        "minutes_by_cat": minutes_by_cat,
+        "total_samples": sum(samples_by_cat.values()),
+        "total_minutes": round(sum(minutes_by_cat.values()), 1),
+    }
+    return answer
+
+
+def point_stay(
+    *,
+    camera: str,
+    x: float,
+    y: float,
+    radius: float | None = None,
+    unit: str = "normalized",
+    cat: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    database: Path | None = None,
+    max_stays: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Which cat stayed near a point on one camera, and for how long.
+
+    ``x``/``y`` are fractions of the frame (0..1, the default) or pixels when
+    ``unit="pixel"``; ``radius`` is in the same unit and defaults to a fraction wide
+    enough to cover a cat's body.
+    """
+    start_ts, end_ts, label = date_span(since, until, now=now)
+    result = point_stay_between(
+        start_ts,
+        end_ts,
+        camera=camera,
+        x=x,
+        y=y,
+        radius=radius,
+        unit=unit,
+        cat=cat,
+        database=database,
+        max_stays=max_stays,
+    )
+    result["range"] = _range_payload(start_ts, end_ts, label)
+    return result
+
+
 def daily_summary(
     *,
     days_ago: int = 0,
@@ -464,6 +714,41 @@ TOOLS: dict[str, Tool] = {
         },
         function=daily_summary,
     ),
+    "point_stay": Tool(
+        name="point_stay",
+        description=(
+            "Which cat stayed near a specific spot on one camera, and for how long. Use "
+            "this when the owner names a point rather than a zone - e.g. a spot on the "
+            "floor where something happened. x/y are fractions of the frame (0..1) unless "
+            "unit is 'pixel'. A coordinate only means something on one camera, so camera "
+            "is required and the same x/y on another camera is a different place."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "camera": {
+                    "type": "string",
+                    "description": "Camera identifier, e.g. living_room, sofa, feeder.",
+                },
+                "x": {"type": "number", "description": "Horizontal position."},
+                "y": {"type": "number", "description": "Vertical position."},
+                "unit": {
+                    "type": "string",
+                    "enum": ["normalized", "pixel"],
+                    "description": "How to read x/y and radius. Default normalized (0..1).",
+                },
+                "radius": {
+                    "type": "number",
+                    "description": "How far around the point counts, in the same unit as x/y.",
+                },
+                "cat": {"type": "string", "description": "Limit to one cat; omit for both."},
+                "since": _DATE_ARGUMENT,
+                "until": _DATE_ARGUMENT,
+            },
+            "required": ["camera", "x", "y"],
+        },
+        function=point_stay,
+    ),
 }
 
 
@@ -495,6 +780,39 @@ def call_tool(
     return {"ok": True, "tool": tool.name, "result": result}
 
 
+# A point the owner names, in the few forms that are unambiguous enough to trust:
+# "x=1200 y=800", "坐标 1200 800", "(1200, 800)". Dates ("2026-10-03") do not match any
+# of these, which is why the bare two-number form needs the 坐标 marker.
+_POINT_XY = re.compile(
+    r"x\s*[=:：]\s*(-?\d+(?:\.\d+)?)[^\d\-]+y\s*[=:：]\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
+)
+_POINT_COORD = re.compile(
+    r"坐标\s*(?:是|为|在|[:：=])?\s*(-?\d+(?:\.\d+)?)[,，\s]+(-?\d+(?:\.\d+)?)"
+)
+_POINT_PAREN = re.compile(r"[（(]\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*[)）]")
+_POINT_RADIUS = re.compile(r"半径\s*[:=：]?\s*(\d+(?:\.\d+)?)")
+
+
+def parse_point(text: str) -> dict | None:
+    """The spot a question names, or ``None``.
+
+    Values at or below 1 on both axes are read as fractions of the frame; anything larger
+    is pixels. That is the one convention that lets "0.6, 0.5" and "1200, 800" both mean
+    what the owner sees.
+    """
+    match = _POINT_XY.search(text) or _POINT_COORD.search(text) or _POINT_PAREN.search(text)
+    if match is None:
+        return None
+    x, y = float(match.group(1)), float(match.group(2))
+    radius = _POINT_RADIUS.search(text)
+    return {
+        "x": x,
+        "y": y,
+        "unit": "normalized" if abs(x) <= 1 and abs(y) <= 1 else "pixel",
+        "radius": float(radius.group(1)) if radius else None,
+    }
+
+
 def answer_question(
     content: str,
     *,
@@ -503,18 +821,56 @@ def answer_question(
     aliases: Mapping | None = None,
     max_stays: int | None = None,
 ) -> dict | None:
-    """A code-computed answer when the question names a zone, else ``None``.
+    """A code-computed answer when the question names a zone or a spot, else ``None``.
 
     ``None`` is the signal to leave the existing behaviour alone: a question that names no
     place is answered by the daily report path exactly as before. When a place *is* named
     the counting is done here, because that is the part the model measurably got wrong.
+
+    A named coordinate is more specific than a named zone ("地板上 (0.6, 0.5)" is a spot
+    inside the floor, not the whole floor), so it wins when both appear.
     """
+    start_ts, end_ts, label = parse_range(content, now=now)
+    cats = resolve_cats(content)
+    cat = cats[0] if len(cats) == 1 else None
+
+    point = parse_point(content)
+    if point is not None:
+        result = {
+            "tool": "point_stay",
+            "question": content.strip()[:200],
+            "range": _range_payload(start_ts, end_ts, label),
+        }
+        cameras = resolve_cameras(content)
+        if len(cameras) != 1:
+            # Coordinates are per camera, so two rooms mean two different places; ask
+            # rather than silently combining them.
+            result["found"] = False
+            result["needs_camera"] = True
+            result["point"] = {key: point[key] for key in ("x", "y", "unit")}
+            result["camera_candidates"] = cameras or sorted(configured_cameras())
+            result["cat"] = cat or "all"
+            return result
+        answer = point_stay_between(
+            start_ts,
+            end_ts,
+            camera=cameras[0],
+            x=point["x"],
+            y=point["y"],
+            radius=point["radius"],
+            unit=point["unit"],
+            cat=cat,
+            database=database,
+            max_stays=max_stays,
+        )
+        answer.update(result)
+        if cat is None and len(cats) > 1:
+            answer["asked_about"] = cats
+        return answer
+
     zones = resolve_zones(content, aliases=aliases, zones=known_zones())
     if not zones:
         return None
-    cats = resolve_cats(content)
-    cat = cats[0] if len(cats) == 1 else None
-    start_ts, end_ts, label = parse_range(content, now=now)
 
     result = stay_rows(start_ts, end_ts, zones, cat, database=database, max_stays=max_stays)
     result["tool"] = "zone_stay"

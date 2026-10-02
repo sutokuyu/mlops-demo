@@ -8,6 +8,13 @@ They also keep the detection box and how lopsided the zone vote was. The anchor
 point alone is not enough to re-derive a location under a different anchor
 strategy, which is exactly the situation the first zone backfill ran into: the
 stored point was all there was to go on.
+
+``norm_x``/``norm_y`` are the anchor *after* alignment, i.e. in the reference
+frame the zones were drawn on - great for zone lookup, useless for pointing at a
+spot on the live picture. ``cam_x``/``cam_y`` keep the same anchor in the camera's
+own frame (0..1 of the frame as captured), so "who was near this spot" can be
+asked with the coordinates the owner reads off the screen. ``frame_width``/
+``frame_height`` turn those fractions into pixels and back.
 """
 
 import sqlite3
@@ -31,7 +38,11 @@ CREATE TABLE IF NOT EXISTS observations (
     box_x2 REAL,
     box_y2 REAL,
     zone_matches INTEGER,
-    zone_samples INTEGER
+    zone_samples INTEGER,
+    cam_x REAL,
+    cam_y REAL,
+    frame_width INTEGER,
+    frame_height INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations (ts);
 
@@ -64,6 +75,12 @@ MIGRATIONS = {
         # How lopsided the zone vote was: 9/9 is confident, 5/9 is not.
         "zone_matches": "ALTER TABLE observations ADD COLUMN zone_matches INTEGER",
         "zone_samples": "ALTER TABLE observations ADD COLUMN zone_samples INTEGER",
+        # The anchor in the camera's own frame, so a spot the owner points at on
+        # the live picture can be matched against history.
+        "cam_x": "ALTER TABLE observations ADD COLUMN cam_x REAL",
+        "cam_y": "ALTER TABLE observations ADD COLUMN cam_y REAL",
+        "frame_width": "ALTER TABLE observations ADD COLUMN frame_width INTEGER",
+        "frame_height": "ALTER TABLE observations ADD COLUMN frame_height INTEGER",
     },
     "visits": {
         "calibration_id": "ALTER TABLE visits ADD COLUMN calibration_id TEXT",
@@ -105,15 +122,36 @@ class ObservationRow:
     box_y2: float | None = None
     zone_matches: int | None = None
     zone_samples: int | None = None
+    cam_x: float | None = None
+    cam_y: float | None = None
+    frame_width: int | None = None
+    frame_height: int | None = None
 
     @property
     def box(self) -> tuple[float, float, float, float] | None:
-        """The detection box in normalized frame coordinates, if it was recorded."""
+        """The detection box in normalized camera-frame coordinates, if recorded."""
         if self.box_x1 is None or self.box_y1 is None:
             return None
         if self.box_x2 is None or self.box_y2 is None:
             return None
         return (self.box_x1, self.box_y1, self.box_x2, self.box_y2)
+
+    @property
+    def camera_anchor(self) -> tuple[float, float] | None:
+        """The anchor in the camera's own frame, best effort.
+
+        Rows written after this column existed carry it directly. Older rows only
+        have the box, and the box bottom-centre *is* that anchor (the box is
+        stored untransformed), so those are recoverable too - the whole history
+        is queryable without a backfill.
+        """
+        if self.cam_x is not None and self.cam_y is not None:
+            return (self.cam_x, self.cam_y)
+        box = self.box
+        if box is None:
+            return None
+        x1, _y1, x2, y2 = box
+        return ((x1 + x2) / 2, y2)
 
 
 class LocationStore:
@@ -147,15 +185,25 @@ class LocationStore:
         alignment_quality: str | None = None,
         box: tuple[float, float, float, float] | None = None,
         vote: tuple[int, int] | None = None,
+        camera_point: tuple[float, float] | None = None,
+        frame_size: tuple[int, int] | None = None,
     ) -> None:
-        """box`` and ``vote`` are normalized box coords and (matches, samples)."""
+        """``box``/``vote`` are normalized box coords and (matches, samples).
+
+        ``camera_point`` is the anchor in the camera frame and ``frame_size`` its
+        (width, height) in pixels, so a coordinate read off the live picture can be
+        matched later without knowing anything about alignment.
+        """
         box_x1, box_y1, box_x2, box_y2 = box if box is not None else (None, None, None, None)
         zone_matches, zone_samples = vote if vote is not None else (None, None)
+        cam_x, cam_y = camera_point if camera_point is not None else (None, None)
+        frame_width, frame_height = frame_size if frame_size is not None else (None, None)
         self._connection.execute(
             "INSERT INTO observations"
             " (ts, cat, camera, zone, confidence, norm_x, norm_y, calibration_id,"
-            "  alignment_quality, box_x1, box_y1, box_x2, box_y2, zone_matches, zone_samples)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  alignment_quality, box_x1, box_y1, box_x2, box_y2, zone_matches, zone_samples,"
+            "  cam_x, cam_y, frame_width, frame_height)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ts,
                 cat,
@@ -172,6 +220,10 @@ class LocationStore:
                 box_y2,
                 zone_matches,
                 zone_samples,
+                cam_x,
+                cam_y,
+                frame_width,
+                frame_height,
             ),
         )
         self._connection.commit()
@@ -215,7 +267,9 @@ class LocationStore:
         """Raw anchors, kept so past days can be re-interpreted with newer zones."""
         rows = self._connection.execute(
             "SELECT ts, cat, camera, zone, confidence, norm_x, norm_y, calibration_id,"
-            " alignment_quality FROM observations WHERE ts >= ? AND ts < ? ORDER BY ts",
+            " alignment_quality, box_x1, box_y1, box_x2, box_y2, zone_matches, zone_samples,"
+            " cam_x, cam_y, frame_width, frame_height"
+            " FROM observations WHERE ts >= ? AND ts < ? ORDER BY ts",
             (start_ts, end_ts),
         ).fetchall()
         return [ObservationRow(*row) for row in rows]
