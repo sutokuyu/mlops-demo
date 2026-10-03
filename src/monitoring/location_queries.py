@@ -450,7 +450,7 @@ def point_stay_between(
     x: float,
     y: float,
     radius: float | None = None,
-    unit: str = "normalized",
+    unit: str | None = None,
     cat: str | None = None,
     database: Path | None = None,
     max_stays: int | None = None,
@@ -470,8 +470,17 @@ def point_stay_between(
     if x is None or y is None:
         raise ValueError("both x and y are required")
 
-    keep = float(radius) if radius is not None else limits["point_radius"]
-    want_pixel = str(unit).lower().startswith("pixel")
+    kind = str(unit or "").strip().lower()
+    if not kind:
+        # No unit given: the magnitude decides, exactly as it does in a typed question.
+        if abs(float(x)) <= 1 and abs(float(y)) <= 1:
+            kind = "normalized"
+        elif abs(float(x)) <= 100 and abs(float(y)) <= 100:
+            kind = "percent"
+        else:
+            kind = "pixel"
+    want_pixel = kind.startswith("pixel")
+    want_percent = kind.startswith("percent") or kind in ("%", "pct")
 
     store = LocationStore(database or location_database())
     try:
@@ -480,17 +489,21 @@ def point_stay_between(
         store.close()
 
     frame = _frame_size(rows)
+    # ``radius`` is given in the caller's unit, but the default is a fraction of the frame
+    # (points are stored 0..1), so the default is not divided by 100 or by the frame.
+    default_radius = limits["point_radius"]
     if want_pixel:
         if frame is None:
-            raise ValueError(
-                f"no frame size recorded for {camera}; give x/y as fractions 0..1 instead"
-            )
+            raise ValueError(f"no frame size recorded for {camera}; give x/y as 0-100 instead")
         width, height = frame
         qx, qy = float(x) / width, float(y) / height
-        radius_norm = keep / width
+        radius_norm = float(radius) / width if radius is not None else default_radius
+    elif want_percent:
+        qx, qy = float(x) / 100.0, float(y) / 100.0
+        radius_norm = float(radius) / 100.0 if radius is not None else default_radius
     else:
         qx, qy = float(x), float(y)
-        radius_norm = keep
+        radius_norm = float(radius) if radius is not None else default_radius
 
     if frame is not None:
         width, height = frame
@@ -549,13 +562,20 @@ def point_stay_between(
             minutes_by_cat.get(stay["cat"], 0.0) + stay["minutes"], 1
         )
 
-    point = {"x": round(qx, 5), "y": round(qy, 5), "unit": "normalized"}
+    point = {
+        "x": round(qx, 5),
+        "y": round(qy, 5),
+        "unit": "normalized",
+        # The 0-100 form, so a harness can hand back the numbers the owner typed.
+        "percent": [round(qx * 100, 2), round(qy * 100, 2)],
+    }
     if frame is not None:
         point["pixels"] = [round(qx * frame[0]), round(qy * frame[1])]
     answer = {
         "camera": camera,
         "point": point,
         "radius": round(radius_norm, 5),
+        "radius_percent": round(radius_norm * 100, 2),
         "cat": cat or "all",
         "found": bool(stays),
         "stays": stays[: max(0, limit)],
@@ -575,7 +595,7 @@ def point_stay(
     x: float,
     y: float,
     radius: float | None = None,
-    unit: str = "normalized",
+    unit: str | None = None,
     cat: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -585,9 +605,9 @@ def point_stay(
 ) -> dict:
     """Which cat stayed near a point on one camera, and for how long.
 
-    ``x``/``y`` are fractions of the frame (0..1, the default) or pixels when
-    ``unit="pixel"``; ``radius`` is in the same unit and defaults to a fraction wide
-    enough to cover a cat's body.
+    ``x``/``y`` are read on the 0-100 scale the preview readout shows, or as 0..1
+    fractions, or as pixels - the magnitudes decide when ``unit`` is omitted. ``radius``
+    is in the same unit and defaults to a fraction wide enough to cover a cat's body.
     """
     start_ts, end_ts, label = date_span(since, until, now=now)
     result = point_stay_between(
@@ -701,9 +721,10 @@ TOOLS: dict[str, Tool] = {
         description=(
             "Which cat stayed near a specific spot on one camera, and for how long. Use "
             "this when the owner names a point rather than a zone - e.g. a spot on the "
-            "floor where something happened. x/y are fractions of the frame (0..1) unless "
-            "unit is 'pixel'. A coordinate only means something on one camera, so camera "
-            "is required and the same x/y on another camera is a different place."
+            "floor where something happened. x/y are on the 0-100 scale the preview "
+            "readout shows (0-1 also accepted; unit='pixel' for raw pixels). A coordinate "
+            "only means something on one camera, so camera is required and the same x/y "
+            "on another camera is a different place."
         ),
         parameters={
             "type": "object",
@@ -712,12 +733,15 @@ TOOLS: dict[str, Tool] = {
                     "type": "string",
                     "description": "Camera identifier, e.g. living_room, sofa, feeder.",
                 },
-                "x": {"type": "number", "description": "Horizontal position."},
-                "y": {"type": "number", "description": "Vertical position."},
+                "x": {"type": "number", "description": "Horizontal position, 0-100 or 0-1."},
+                "y": {"type": "number", "description": "Vertical position, 0-100 or 0-1."},
                 "unit": {
                     "type": "string",
-                    "enum": ["normalized", "pixel"],
-                    "description": "How to read x/y and radius. Default normalized (0..1).",
+                    "enum": ["percent", "normalized", "pixel"],
+                    "description": (
+                        "How to read x/y and radius: percent (0-100), normalized (0-1) "
+                        "or pixel. Omit it and the magnitudes decide."
+                    ),
                 },
                 "radius": {
                     "type": "number",
@@ -778,19 +802,26 @@ _POINT_RADIUS = re.compile(r"半径\s*[:=：]?\s*(\d+(?:\.\d+)?)")
 def parse_point(text: str) -> dict | None:
     """The spot a question names, or ``None``.
 
-    Values at or below 1 on both axes are read as fractions of the frame; anything larger
-    is pixels. That is the one convention that lets "0.6, 0.5" and "1200, 800" both mean
-    what the owner sees.
+    Three scales are read from the numbers themselves, because the owner should not have
+    to say which one they mean: at or below 1 is a fraction of the frame (how the data
+    is stored), up to 100 is the 0-100 scale the readout shows, and anything larger is a
+    raw pixel coordinate. That keeps old questions and new ones working from one syntax.
     """
     match = _POINT_XY.search(text) or _POINT_COORD.search(text) or _POINT_PAREN.search(text)
     if match is None:
         return None
     x, y = float(match.group(1)), float(match.group(2))
     radius = _POINT_RADIUS.search(text)
+    if abs(x) <= 1 and abs(y) <= 1:
+        unit = "normalized"
+    elif abs(x) <= 100 and abs(y) <= 100:
+        unit = "percent"
+    else:
+        unit = "pixel"
     return {
         "x": x,
         "y": y,
-        "unit": "normalized" if abs(x) <= 1 and abs(y) <= 1 else "pixel",
+        "unit": unit,
         "radius": float(radius.group(1)) if radius else None,
     }
 

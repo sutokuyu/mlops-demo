@@ -587,6 +587,11 @@ def test_point_stay_needs_a_camera() -> None:
         ("客厅坐标 0.6 0.5 那里", 0.6, 0.5, "normalized"),
         ("客厅地板上 (0.6, 0.5)", 0.6, 0.5, "normalized"),
         ("sofa (1200,800)", 1200.0, 800.0, "pixel"),
+        # The 0-100 scale the preview readout shows. Values above 1 and up to 100 are
+        # read as percent, so the same syntax works for an old 0-1 question and a new one.
+        ("客厅地板上 (62, 91)", 62.0, 91.0, "percent"),
+        ("沙发坐标 50 90 谁待得久", 50.0, 90.0, "percent"),
+        ("sofa x=62.5 y=91.4", 62.5, 91.4, "percent"),
     ],
 )
 def test_a_point_can_be_read_from_a_question(text: str, x: float, y: float, unit: str) -> None:
@@ -598,6 +603,34 @@ def test_a_point_can_be_read_from_a_question(text: str, x: float, y: float, unit
 def test_a_question_without_a_coordinate_has_no_point() -> None:
     assert queries.parse_point("今天两只猫都做什么了") is None
     assert queries.parse_point("2026-10-03 的报告") is None
+
+
+def test_point_stay_understands_the_0_100_scale(tmp_path: Path) -> None:
+    """The preview readout is 0-100, so a question typed from it must resolve too."""
+    database = seed_observations(tmp_path / "history.db", [(3, "kurumi", "living_room", 0.5, 0.9)])
+    result = queries.point_stay(
+        camera="living_room", x=50, y=90, since="2026-10-03", database=database, now=NOW
+    )
+    assert result["found"] is True
+    assert result["point"]["x"] == pytest.approx(0.5)
+    assert result["point"]["percent"] == [50.0, 90.0]
+
+
+def test_the_answer_reports_the_point_in_every_scale(tmp_path: Path) -> None:
+    """Stored 0-1, shown 0-100, pixels when the frame size is known."""
+    database = seed_observations(tmp_path / "history.db", [(3, "kurumi", "living_room", 0.5, 0.9)])
+    result = queries.point_stay(
+        camera="living_room", x=50, y=90, radius=5, since="2026-10-03", database=database, now=NOW
+    )
+    assert result["point"] == {
+        "x": 0.5,
+        "y": 0.9,
+        "unit": "normalized",
+        "percent": [50.0, 90.0],
+        "pixels": [800, 810],
+    }
+    assert result["radius"] == pytest.approx(0.05)
+    assert result["radius_percent"] == 5.0
 
 
 def test_a_coordinate_question_is_answered_from_the_data(tmp_path: Path) -> None:

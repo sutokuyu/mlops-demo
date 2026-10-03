@@ -210,9 +210,9 @@ The canvas draws polygons in the camera's reference frame and saves them to
 `configs/zones.yaml` via `POST /api/zones/<camera>`. Each detection is drawn with
 a crosshair on its bottom-centre anchor, which is the point zone lookup uses, so
 what you see is what the tracker will match. Moving the pointer over the picture
-shows its **normalized coordinates** (`x 0.6213  y 0.9140`) in the corner of the
-frame - the same numbers a Discord point question takes, so a spot can be read off
-the screen instead of guessed.
+shows its coordinates on the **0-100 scale** (`x 62.13  y 91.40`) in the corner of
+the frame - the same numbers a Discord point question takes, so a spot can be read
+off the screen instead of guessed.
 
 Editing a polygon that is already saved: click empty space to start a new one, or
 **drag any drawn corner** to nudge it. Handles only respond while 显示区域描点 is
@@ -506,12 +506,13 @@ specific spot on one camera).
 #### Asking about a spot, not a zone
 
 A zone like `floor` is far too coarse to say *where* on the floor something happened.
-`point_stay` takes a camera and an `x`/`y` - fractions of the frame (0..1) by default,
-or pixels with `unit="pixel"` - and returns, per cat, the minutes spent within `radius`
-of that point, with the individual stays:
+`point_stay` takes a camera and an `x`/`y` on the **0-100 scale** the preview readout
+shows (0..1 fractions and raw pixels are accepted too - the magnitudes decide when
+`unit` is omitted) and returns, per cat, the minutes spent within `radius` of that
+point, with the individual stays:
 
 ```python
-call_tool("point_stay", {"camera": "living_room", "x": 0.6, "y": 0.5})
+call_tool("point_stay", {"camera": "living_room", "x": 60, "y": 50})
 # -> {"ok": True, "result": {"minutes_by_cat": {"kurumi": 4.0}, "stays": [...], ...}}
 ```
 

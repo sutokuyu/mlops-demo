@@ -392,6 +392,9 @@ def test_the_canvas_shows_the_pointer_coordinates() -> None:
     assert "function showCoords(" in INDEX_HTML
     assert "showCoords(x, y);" in INDEX_HTML
     assert "clearCoords();" in INDEX_HTML
+    # The 0-100 scale, not 0-1: that is what the owner types back at the bot.
+    assert "* 100" in INDEX_HTML
+    assert "(0-100)" in INDEX_HTML
 
 
 def test_locations_are_empty_until_something_is_reported(base_url: str) -> None:

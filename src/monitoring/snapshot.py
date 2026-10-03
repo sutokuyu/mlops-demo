@@ -543,8 +543,12 @@ def draw_point(image: np.ndarray, point: tuple[float, float], radius: float) -> 
     pixels = max(4, int(round(float(radius) * width)))
     cv2.circle(image, (cx, cy), pixels, POINT_COLOR, 2)
     cv2.drawMarker(image, (cx, cy), POINT_COLOR, cv2.MARKER_CROSS, 22, 2)
-    # ASCII only: cv2.putText cannot draw the Chinese that would read better here.
-    label = f"point ({float(point[0]):.3f}, {float(point[1]):.3f}) r={float(radius):.3f}"
+    # ASCII only: cv2.putText cannot draw the Chinese that would read better here. The
+    # 0-100 form is shown because that is what the owner reads off the preview and types.
+    label = (
+        f"point {float(point[0]) * 100:.1f},{float(point[1]) * 100:.1f} (0-100)"
+        f"  r={float(radius) * 100:.1f}"
+    )
     # Keep the label on the frame when the point sits near an edge.
     tx = min(max(cx + 12, 4), max(4, width - 320))
     ty = min(max(cy - 12, 20), max(20, height - 8))
@@ -585,7 +589,7 @@ def build_point_snapshot(
     moment = datetime.now()
     header = (
         f"{camera} live {moment.strftime('%Y-%m-%d %H:%M:%S')}"
-        f"  point=({point[0]:.3f},{point[1]:.3f}) r={radius:.3f}"
+        f"  point=({point[0] * 100:.1f},{point[1] * 100:.1f}) r={radius * 100:.1f} (0-100)"
     )
     image = render_overlay(_resize_for_display(frame, settings.max_width), zones, header, subheader)
     draw_point(image, point, radius)
@@ -594,7 +598,7 @@ def build_point_snapshot(
         return SnapshotReply(f"`{camera}` 的画面抓到了，但存成图片失败，再看一眼日志。")
 
     caption = (
-        f"📍 图上橙色的圈就是你问的那个点：`{camera}` x={point[0]:.3f} y={point[1]:.3f}"
-        f" 半径 {radius:.3f}。圈的不是你想的地方就换个坐标再问一次。"
+        f"📍 图上橙色的圈就是你问的那个点：`{camera}` x={point[0] * 100:.1f} y={point[1] * 100:.1f}"
+        f"（0-100 体系），半径 {radius * 100:.1f}。圈的不是你想的地方就换个坐标再问一次。"
     )
     return SnapshotReply(caption, image_path)

@@ -175,8 +175,10 @@ QUERY = (
     "`found` is false) the answer is that there is no such record in that range - say "
     "exactly that, and do not add a pass-by or any other conclusion the data does not "
     "contain. When `needs_camera` is true the question named a coordinate without saying "
-    "which camera: ask which one, offering `camera_candidates`, because the same numbers "
-    "are a different place on a different camera. A coordinate answer's `stays` and "
+    "which camera: ask which one, offering `camera_candidates` AND repeating the point's "
+    "`percent` numbers, so the owner can answer by just adding the camera name to the "
+    "same coordinates - the bot keeps no state between messages. A coordinate answer's "
+    "`stays` and "
     "`minutes_by_cat` are already the answer to 'which cat was there, and for how long' - "
     "rank the cats by the minutes given, do not compare coordinates yourself."
 )

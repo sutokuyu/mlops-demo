@@ -499,7 +499,7 @@ INDEX_HTML = """<!doctype html>
   <section class="stage" id="stage">
     <img id="stream" alt="camera stream">
     <canvas id="overlay"></canvas>
-    <div class="coords" id="coords">x –  y –</div>
+    <div class="coords" id="coords">x –  y –  (0-100)</div>
     <div class="placeholder" id="placeholder">等待摄像头画面…</div>
   </section>
   <aside>
@@ -644,17 +644,18 @@ window.addEventListener("resize", syncCanvas);
 
 function clamp01(value) { return Math.min(1, Math.max(0, value)); }
 
-// The coordinates the Discord point question wants: fractions of the frame, 0 at the
-// left/top and 1 at the right/bottom. Shown live under the pointer so the owner can
-// read the spot off the picture instead of guessing it.
+// The coordinates the Discord point question wants, on the 0-100 scale (left/top 0,
+// right/bottom 100). Shown live under the pointer so the owner can read the spot off
+// the picture instead of guessing it.
 function showCoords(x, y) {
   const w = canvas.width, h = canvas.height;
   if (!w || !h) return;
-  el("coords").textContent = "x " + (x / w).toFixed(4) + "  y " + (y / h).toFixed(4);
+  el("coords").textContent =
+    "x " + (x / w * 100).toFixed(2) + "  y " + (y / h * 100).toFixed(2) + "  (0-100)";
 }
 
 function clearCoords() {
-  el("coords").textContent = "x –  y –";
+  el("coords").textContent = "x –  y –  (0-100)";
 }
 
 function canvasPoint(event) {

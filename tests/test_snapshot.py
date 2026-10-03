@@ -516,7 +516,7 @@ def test_a_coordinate_answer_can_come_with_the_spot_marked(monkeypatch) -> None:
     reply = point_build(monkeypatch)
     assert reply.image_path is not None
     assert reply.image_path.is_file()
-    assert "0.500" in reply.caption and "sofa" in reply.caption
+    assert "50.0" in reply.caption and "sofa" in reply.caption
     image = cv2.imread(str(reply.image_path))
     marker = np.array(snapshot.POINT_COLOR)
     # JPEG is lossy, so the colour is close rather than exact.
