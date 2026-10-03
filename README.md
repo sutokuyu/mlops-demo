@@ -209,7 +209,10 @@ per camera competes with that recording for the same link.
 The canvas draws polygons in the camera's reference frame and saves them to
 `configs/zones.yaml` via `POST /api/zones/<camera>`. Each detection is drawn with
 a crosshair on its bottom-centre anchor, which is the point zone lookup uses, so
-what you see is what the tracker will match.
+what you see is what the tracker will match. Moving the pointer over the picture
+shows its **normalized coordinates** (`x 0.6213  y 0.9140`) in the corner of the
+frame - the same numbers a Discord point question takes, so a spot can be read off
+the screen instead of guessed.
 
 Editing a polygon that is already saved: click empty space to start a new one, or
 **drag any drawn corner** to nudge it. Handles only respond while 显示区域描点 is
@@ -525,6 +528,13 @@ is answered from `point_stay`. Which words mean which camera is the *same* list 
 snapshot feature uses, `discord_bot.snapshot.aliases` (客厅/沙发/喂食器...), so there is
 one camera vocabulary to maintain. When a coordinate is given without a camera the bot
 asks which one rather than guessing.
+
+The answer comes with a **live frame with the spot circled** (orange circle + crosshair,
+plus the radius it matched with), so an owner who meant a different place can see that
+immediately and ask again. It rides on the same held-stream machinery as "@bot 沙发画面"
+- one RTSP session per camera, released when idle - and taking it is best-effort: if the
+camera is busy or offline the text answer still arrives, with a note instead of a
+picture.
 
 ### 10. Run it 24/7
 

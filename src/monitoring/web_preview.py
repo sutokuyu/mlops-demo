@@ -442,6 +442,9 @@ INDEX_HTML = """<!doctype html>
            border-radius:12px; overflow:hidden; }
   .stage img { display:block; width:100%; }
   .stage canvas { position:absolute; inset:0; cursor:crosshair; }
+  .coords { position:absolute; right:8px; bottom:8px; background:rgba(14,16,21,.82);
+            border:1px solid var(--line); border-radius:8px; padding:4px 9px;
+            font-size:12.5px; font-variant-numeric:tabular-nums; pointer-events:none; }
   .placeholder { padding:64px 24px; text-align:center; color:var(--muted); }
   aside { background:var(--panel); border:1px solid var(--line); border-radius:12px;
           padding:14px; }
@@ -496,6 +499,7 @@ INDEX_HTML = """<!doctype html>
   <section class="stage" id="stage">
     <img id="stream" alt="camera stream">
     <canvas id="overlay"></canvas>
+    <div class="coords" id="coords">x –  y –</div>
     <div class="placeholder" id="placeholder">等待摄像头画面…</div>
   </section>
   <aside>
@@ -640,6 +644,19 @@ window.addEventListener("resize", syncCanvas);
 
 function clamp01(value) { return Math.min(1, Math.max(0, value)); }
 
+// The coordinates the Discord point question wants: fractions of the frame, 0 at the
+// left/top and 1 at the right/bottom. Shown live under the pointer so the owner can
+// read the spot off the picture instead of guessing it.
+function showCoords(x, y) {
+  const w = canvas.width, h = canvas.height;
+  if (!w || !h) return;
+  el("coords").textContent = "x " + (x / w).toFixed(4) + "  y " + (y / h).toFixed(4);
+}
+
+function clearCoords() {
+  el("coords").textContent = "x –  y –";
+}
+
 function canvasPoint(event) {
   const rect = canvas.getBoundingClientRect();
   return [event.clientX - rect.left, event.clientY - rect.top];
@@ -699,6 +716,7 @@ canvas.addEventListener("pointerdown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   const [x, y] = canvasPoint(event);
+  showCoords(x, y);
   if (!drag) { setHover(zoneAt(x, y)); return; }
   const zone = zoneEntries()[drag.zoneIndex];
   if (!zone || !zone.points[drag.pointIndex]) { drag = null; return; }
@@ -708,7 +726,9 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
-canvas.addEventListener("pointerleave", () => { if (!drag) setHover(null); });
+canvas.addEventListener("pointerleave", () => {
+  if (!drag) { setHover(null); clearCoords(); }
+});
 
 canvas.addEventListener("click", (event) => {
   if (grabbed) { grabbed = false; return; }

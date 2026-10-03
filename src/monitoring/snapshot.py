@@ -107,6 +107,10 @@ DEFAULT_IDLE_TIMEOUT_SECONDS = 120.0
 # readers report frames within a few seconds, so this only has to outlast a stall.
 DEFAULT_FRAME_TIMEOUT_SECONDS = 20.0
 
+# The marker for the spot a point question asked about, in BGR. Deliberately not the
+# zone green: this is the answer's target, not a stored polygon.
+POINT_COLOR = (0, 140, 255)
+
 MENTION_PATTERN = re.compile(r"<@[!&]?\d+>|@everyone|@here")
 
 # Words that add nothing to "show me this camera", stripped along with the camera
@@ -524,3 +528,73 @@ def build_snapshot(
         lines.append("这个相机还没有画过区域，图上只有画面本身。")
     lines.append(verdict)
     return SnapshotReply("\n".join(lines), image_path)
+
+
+def draw_point(image: np.ndarray, point: tuple[float, float], radius: float) -> None:
+    """Circle + crosshair at a normalized point, with the radius it was matched with.
+
+    Drawn in the camera's own coordinates - the same ones the point question matched
+    against - so a circle that is not on the thing the owner meant is exactly the
+    signal that the coordinates were wrong.
+    """
+    height, width = image.shape[:2]
+    cx = int(round(float(point[0]) * width))
+    cy = int(round(float(point[1]) * height))
+    pixels = max(4, int(round(float(radius) * width)))
+    cv2.circle(image, (cx, cy), pixels, POINT_COLOR, 2)
+    cv2.drawMarker(image, (cx, cy), POINT_COLOR, cv2.MARKER_CROSS, 22, 2)
+    # ASCII only: cv2.putText cannot draw the Chinese that would read better here.
+    label = f"point ({float(point[0]):.3f}, {float(point[1]):.3f}) r={float(radius):.3f}"
+    # Keep the label on the frame when the point sits near an edge.
+    tx = min(max(cx + 12, 4), max(4, width - 320))
+    ty = min(max(cy - 12, 20), max(20, height - 8))
+    cv2.putText(image, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, POINT_COLOR, 2)
+
+
+def build_point_snapshot(
+    camera: str,
+    point: tuple[float, float],
+    radius: float,
+    *,
+    settings: SnapshotSettings | None = None,
+    cache: SnapshotCache | None = None,
+    frame_provider=None,
+) -> SnapshotReply:
+    """One live frame with the asked-about spot marked, so the owner can check it.
+
+    Sent with a coordinate answer so a circle that landed on the wrong place can be
+    corrected by asking again - the whole reason the picture is attached. Camera
+    problems come back as a sentence, exactly like :func:`build_snapshot`.
+    """
+    settings = settings or snapshot_settings()
+    try:
+        source = current_source(camera)
+    except RuntimeError as error:
+        return SnapshotReply(f"`{camera}` 拿不到 RTSP 地址：{error}")
+    if not source:
+        return SnapshotReply(f"`{camera}` 还没有配置 RTSP 地址，标不了点。")
+
+    provider = frame_provider or (cache or default_cache()).frame
+    frame = provider(camera, source)
+    if frame is None:
+        return SnapshotReply(f"`{camera}` 的画面没抓到，标不了点（相机可能正忙或不在线）。")
+
+    calibration = load_calibrations().get(camera)
+    zones = list(calibration.zones) if calibration is not None else []
+    subheader, verdict = alignment_verdict(calibration, frame)
+    moment = datetime.now()
+    header = (
+        f"{camera} live {moment.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"  point=({point[0]:.3f},{point[1]:.3f}) r={radius:.3f}"
+    )
+    image = render_overlay(_resize_for_display(frame, settings.max_width), zones, header, subheader)
+    draw_point(image, point, radius)
+    image_path = _write_jpeg(image, settings.jpeg_quality)
+    if image_path is None:
+        return SnapshotReply(f"`{camera}` 的画面抓到了，但存成图片失败，再看一眼日志。")
+
+    caption = (
+        f"📍 图上橙色的圈就是你问的那个点：`{camera}` x={point[0]:.3f} y={point[1]:.3f}"
+        f" 半径 {radius:.3f}。圈的不是你想的地方就换个坐标再问一次。"
+    )
+    return SnapshotReply(caption, image_path)

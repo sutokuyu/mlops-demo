@@ -382,6 +382,18 @@ def test_index_page_has_a_live_location_panel(base_url: str) -> None:
     assert "/api/locations" in body
 
 
+def test_the_canvas_shows_the_pointer_coordinates() -> None:
+    """The owner reads the spot off the picture, so the picture has to show it.
+
+    The Discord point question takes normalized coordinates; without a readout the
+    owner has to guess them, which is the step that makes the feature unusable.
+    """
+    assert 'id="coords"' in INDEX_HTML
+    assert "function showCoords(" in INDEX_HTML
+    assert "showCoords(x, y);" in INDEX_HTML
+    assert "clearCoords();" in INDEX_HTML
+
+
 def test_locations_are_empty_until_something_is_reported(base_url: str) -> None:
     payload = get_json(base_url + "/api/locations?since=0")
     assert payload == {"seq": 0, "events": []}

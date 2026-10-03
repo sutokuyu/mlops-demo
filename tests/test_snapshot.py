@@ -484,3 +484,64 @@ def test_the_image_is_downscaled_to_the_configured_width(monkeypatch) -> None:
     reply.image_path.unlink()
     assert image.shape[1] == 100
     assert image.shape[0] == 50
+
+
+# --- the spot a coordinate question asked about ----------------------------
+#
+# The answer carries a frame with the searched point circled, so an owner who meant a
+# different spot can see that and ask again. The circle must land on the coordinate the
+# question used, in the camera's own frame - the same one the lookup ran against.
+
+
+def point_build(monkeypatch, camera="sofa", point=(0.5, 0.5), radius=0.1, frame=None):
+    monkeypatch.setattr(snapshot, "current_source", lambda name: "rtsp://x")
+    monkeypatch.setattr(
+        snapshot,
+        "load_calibrations",
+        lambda: {"sofa": Calibration(camera="sofa", zones=[square_zone()])},
+    )
+    monkeypatch.setattr(snapshot, "alignment_verdict", lambda *a, **k: ("align=good", "一致。"))
+    return snapshot.build_point_snapshot(
+        camera,
+        point,
+        radius,
+        settings=settings(),
+        frame_provider=lambda name, source: (
+            synthetic_frame(width=400, height=200) if frame is None else frame
+        ),
+    )
+
+
+def test_a_coordinate_answer_can_come_with_the_spot_marked(monkeypatch) -> None:
+    reply = point_build(monkeypatch)
+    assert reply.image_path is not None
+    assert reply.image_path.is_file()
+    assert "0.500" in reply.caption and "sofa" in reply.caption
+    image = cv2.imread(str(reply.image_path))
+    marker = np.array(snapshot.POINT_COLOR)
+    # JPEG is lossy, so the colour is close rather than exact.
+    assert (np.abs(image.astype(int) - marker).sum(axis=2) < 90).any()
+    reply.image_path.unlink()
+
+
+def test_the_marker_lands_on_the_normalized_point(monkeypatch) -> None:
+    """Normalized, because that is what a coordinate question carries."""
+    reply = point_build(monkeypatch, point=(0.25, 0.75), radius=0.05)
+    image = cv2.imread(str(reply.image_path))
+    height, width = image.shape[:2]
+    pixel = image[int(0.75 * height), int(0.25 * width)].astype(int)
+    assert np.abs(pixel - np.array(snapshot.POINT_COLOR)).sum() < 90
+    reply.image_path.unlink()
+
+
+def test_a_frame_that_never_arrives_leaves_no_image(monkeypatch) -> None:
+    monkeypatch.setattr(snapshot, "current_source", lambda name: "rtsp://x")
+    reply = snapshot.build_point_snapshot(
+        "sofa",
+        (0.5, 0.5),
+        0.1,
+        settings=settings(),
+        frame_provider=lambda name, source: None,
+    )
+    assert reply.image_path is None
+    assert "没抓到" in reply.caption

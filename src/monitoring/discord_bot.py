@@ -56,6 +56,7 @@ from src.monitoring.location_report import (
 from src.monitoring.snapshot import (
     SnapshotReply,
     SnapshotSettings,
+    build_point_snapshot,
     build_snapshot,
     camera_only_reference,
     snapshot_settings,
@@ -347,7 +348,68 @@ def build_reply(
     database: Path | None = None,
     temperature: float | None = None,
 ) -> str:
-    """The message to send back. Always returns a string, never raises.
+    """The message text only - kept for callers that do not send attachments.
+
+    See :func:`build_answer` for the version that also returns the marked frame a point
+    question gets.
+    """
+    return build_answer(
+        content,
+        settings=settings,
+        days_ago=days_ago,
+        database=database,
+        temperature=temperature,
+    ).text
+
+
+@dataclass(frozen=True)
+class BotReply:
+    """What to say, plus the local image to attach (``None`` when there is none)."""
+
+    text: str
+    image_path: Path | None = None
+
+
+def point_image(verdict: dict | None, settings: BotSettings) -> tuple[Path | None, str]:
+    """A live frame with the asked-about spot circled, best effort.
+
+    Only a coordinate question that named a camera gets one: the owner has to be able to
+    see that the bot looked where they meant, and a circle on the wrong spot is the
+    fastest way to find that out - which is the whole reason the picture is attached. A
+    picture that cannot be taken must never cost the answer, so every failure is logged
+    and dropped.
+    """
+    if not verdict or verdict.get("tool") != "point_stay" or verdict.get("needs_camera"):
+        return None, ""
+    point = verdict.get("point") or {}
+    camera = verdict.get("camera")
+    if not camera or "x" not in point or "y" not in point:
+        return None, ""
+    try:
+        marked = build_point_snapshot(
+            str(camera),
+            (float(point["x"]), float(point["y"])),
+            float(verdict.get("radius") or 0.0),
+            settings=settings.snapshot,
+        )
+    except Exception as error:  # a bonus picture must not break the reply
+        print(f"discord_bot: could not mark the point: {error}", file=sys.stderr)
+        return None, ""
+    if marked.image_path is None:
+        print(f"discord_bot: no marked frame: {marked.caption}", file=sys.stderr)
+        return None, ""
+    return marked.image_path, marked.caption
+
+
+def build_answer(
+    content: str,
+    *,
+    settings: BotSettings | None = None,
+    days_ago: int | None = None,
+    database: Path | None = None,
+    temperature: float | None = None,
+) -> BotReply:
+    """The reply to send. Always returns something, never raises.
 
     Two separate fallbacks, because the two failures lose different things:
 
@@ -366,7 +428,7 @@ def build_reply(
         summary = build_summary(day, database if database is not None else settings.database)
     except REPORT_ERRORS as error:
         print(f"discord_bot: could not read {day.isoformat()}: {error}", file=sys.stderr)
-        return format_failure(day, error)
+        return BotReply(format_failure(day, error))
 
     text = render_text(summary)
     verdict = answer_from_the_data(
@@ -385,8 +447,13 @@ def build_reply(
             f"discord_bot: the LLM rewrite failed ({error}); sending the plain summary",
             file=sys.stderr,
         )
-        return text[:DISCORD_MESSAGE_LIMIT]
-    return narrative[:DISCORD_MESSAGE_LIMIT]
+        return BotReply(text[:DISCORD_MESSAGE_LIMIT])
+
+    answer = narrative[:DISCORD_MESSAGE_LIMIT]
+    image_path, caption = point_image(verdict, settings)
+    if image_path is not None and caption:
+        answer = (answer + "\n" + caption)[:DISCORD_MESSAGE_LIMIT]
+    return BotReply(answer, image_path)
 
 
 def describe_settings(settings: BotSettings) -> str:
@@ -495,8 +562,15 @@ async def handle_message(message, settings: BotSettings, bot_id: int | None = No
     # on the event loop would stall the Gateway heartbeat and every other channel
     # while the model thinks, so they go to a thread.
     async with message.channel.typing():
-        reply = await asyncio.to_thread(build_reply, message.content, settings=settings)
-    await message.reply(reply)
+        reply = await asyncio.to_thread(build_answer, message.content, settings=settings)
+    upload = {"file": discord_file(reply.image_path)} if reply.image_path else {}
+    try:
+        await message.reply(reply.text, **upload)
+    finally:
+        # Discord holds the upload now, so a local temp file is just litter that would
+        # otherwise accumulate one per coordinate question.
+        if reply.image_path is not None:
+            Path(reply.image_path).unlink(missing_ok=True)
 
 
 def describe_channel_access(client, channel_id: int) -> str:

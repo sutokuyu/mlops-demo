@@ -941,3 +941,100 @@ def test_a_broken_query_still_sends_the_report(monkeypatch, tmp_path: Path) -> N
         database=database_with_a_sink(tmp_path),
     )
     assert reply == "喵"
+
+
+# --- a coordinate answer comes back with the spot circled -------------------
+#
+# The picture is the point of the feature: the owner checks that the bot looked where
+# they meant, and re-asks if it did not. It must never cost the text answer.
+
+
+def point_verdict(**overrides) -> dict:
+    verdict = {
+        "tool": "point_stay",
+        "camera": "sofa",
+        "point": {"x": 0.62, "y": 0.91, "unit": "normalized"},
+        "radius": 0.08,
+        "found": True,
+        "minutes_by_cat": {"kurumi": 3.0},
+    }
+    verdict.update(overrides)
+    return verdict
+
+
+def test_a_coordinate_verdict_gets_the_frame_marked(monkeypatch, tmp_path: Path) -> None:
+    image = tmp_path / "marked.jpg"
+    image.write_bytes(b"jpeg")
+    captured = {}
+
+    def fake_build(camera, point, radius, **kwargs):
+        captured.update(camera=camera, point=point, radius=radius)
+        return SnapshotReply("圈在这里", image)
+
+    monkeypatch.setattr(discord_bot, "build_point_snapshot", fake_build)
+    path, caption = discord_bot.point_image(point_verdict(), settings())
+    assert path == image and caption == "圈在这里"
+    assert captured == {"camera": "sofa", "point": (0.62, 0.91), "radius": 0.08}
+
+
+def test_only_a_coordinate_question_gets_a_frame(monkeypatch) -> None:
+    monkeypatch.setattr(
+        discord_bot, "build_point_snapshot", lambda *a, **k: pytest.fail("no frame for this")
+    )
+    assert discord_bot.point_image(None, settings()) == (None, "")
+    assert discord_bot.point_image({"tool": "zone_stay"}, settings()) == (None, "")
+    assert discord_bot.point_image(point_verdict(needs_camera=True), settings()) == (None, "")
+
+
+def test_a_picture_that_fails_does_not_cost_the_answer(monkeypatch) -> None:
+    def boom(*args, **kwargs):
+        raise RuntimeError("stream is down")
+
+    monkeypatch.setattr(discord_bot, "build_point_snapshot", boom)
+    assert discord_bot.point_image(point_verdict(), settings()) == (None, "")
+
+
+def test_a_camera_that_cannot_be_reached_keeps_the_text_answer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        discord_bot, "build_point_snapshot", lambda *a, **k: SnapshotReply("没抓到画面")
+    )
+    assert discord_bot.point_image(point_verdict(), settings()) == (None, "")
+
+
+def test_build_answer_appends_the_caption_and_carries_the_image(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "discord")
+    image = tmp_path / "marked.jpg"
+    image.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        discord_bot, "build_point_snapshot", lambda *a, **k: SnapshotReply("圈在这里", image)
+    )
+    monkeypatch.setattr(discord_bot, "answer_from_the_data", lambda *a, **k: point_verdict())
+
+    reply = discord_bot.build_answer(
+        "报告 沙发 (0.62, 0.91) 谁待得最久",
+        settings=settings(database=database_with_a_visit(tmp_path)),
+    )
+    assert reply.image_path == image
+    assert reply.text.endswith("圈在这里")
+    # build_reply stays text-only for callers that do not upload attachments.
+    text_only = build_reply("报告", settings=settings(database=database_with_a_visit(tmp_path)))
+    assert isinstance(text_only, str)
+
+
+def test_handle_message_uploads_the_marked_frame(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "discord")
+    image = tmp_path / "marked.jpg"
+    image.write_bytes(b"jpeg")
+    monkeypatch.setattr(
+        discord_bot, "build_answer", lambda *a, **k: discord_bot.BotReply("看这里", image)
+    )
+    monkeypatch.setattr(discord_bot, "discord_file", lambda path: ("file", str(path)))
+    message = FakeMessage("报告")
+
+    asyncio.run(discord_bot.handle_message(message, settings=settings()))
+
+    assert message.replies == ["看这里"]
+    assert message.uploads == [("file", str(image))]
+    assert not image.exists(), "the temp file must be deleted once Discord has it"
