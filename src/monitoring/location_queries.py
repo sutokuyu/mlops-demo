@@ -38,6 +38,7 @@ from src.monitoring.location_config import (
 )
 from src.monitoring.location_report import build_summary, day_bounds
 from src.monitoring.location_store import LocationStore
+from src.monitoring.snapshot import camera_labels, snapshot_settings
 from src.monitoring.zone_vocabulary import known_zones, resolve_zones
 
 DEFAULT_MAX_DAYS = 31
@@ -48,15 +49,6 @@ DEFAULT_TOP_ZONES = 10
 # gap of a minute splits one visit from the next.
 DEFAULT_POINT_RADIUS = 0.05
 DEFAULT_POINT_GAP_SECONDS = 60.0
-
-# What each camera is called in ordinary speech, next to its identifier. Kept short on
-# purpose: a coordinate only means something on one camera, so a point question has to
-# name the camera, and the owner says 客厅 rather than living_room.
-DEFAULT_CAMERA_ALIASES: dict[str, list[str]] = {
-    "living_room": ["客厅", "起居室"],
-    "sofa": ["沙发"],
-    "feeder": ["喂食器", "厨房"],
-}
 
 # See discord_bot.DAY_BEFORE_YESTERDAY_WORDS / YESTERDAY_WORDS: the same phrases, kept
 # here so a question's range and its report day cannot drift apart (a test compares them).
@@ -115,35 +107,25 @@ def resolve_cats(text: str, *, cats: Sequence[str] | None = None) -> list[str]:
 # --- cameras ---------------------------------------------------------------
 #
 # A coordinate exists only on one camera: (0.6, 0.5) is the sink on living_room and a
-# cushion on sofa. So a point question must say which camera, which is why cameras get
-# the same owner-word treatment as zones.
-
-
-def camera_aliases(config: Mapping | None = None) -> dict[str, list[str]]:
-    """Camera identifier -> the words that may refer to it."""
-    raw = (config if config is not None else REPORT_CONFIG.get("camera_aliases")) or {}
-    merged = {camera: list(words) for camera, words in DEFAULT_CAMERA_ALIASES.items()}
-    for camera, words in raw.items():
-        merged[str(camera)] = _as_list(words)
-    return merged
+# cushion on sofa. So a point question must say which camera. The words for a camera are
+# deliberately NOT a second vocabulary - they are the same ``discord_bot.snapshot.aliases``
+# the picture feature already uses (客厅/沙发/喂食器...), so the owner keeps one list and
+# both features understand the same names.
 
 
 def resolve_cameras(text: str, *, cameras: Sequence[str] | None = None) -> list[str]:
     """Every camera the text names, by identifier or by one of its words.
 
     Deliberately does not guess: no camera named returns an empty list, and the caller
-    asks which one rather than combining coordinates from two rooms.
+    asks which one rather than combining coordinates from two rooms. Longest label first,
+    so a longer name and a prefix of it cannot disagree about what was said.
     """
     available = list(cameras if cameras is not None else configured_cameras())
     lowered = text.lower()
+    labels = camera_labels(available, snapshot_settings().aliases)
     found: list[str] = []
-    for camera, words in camera_aliases().items():
-        if camera not in available:
-            continue
-        if re.search(rf"(?<![a-z0-9_]){re.escape(camera)}(?![a-z0-9_])", lowered):
-            found.append(camera)
-            continue
-        if any(word.lower() in lowered for word in words):
+    for label, camera in sorted(labels.items(), key=lambda item: (-len(item[0]), item[0])):
+        if label and label in lowered and camera not in found:
             found.append(camera)
     return found
 

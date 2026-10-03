@@ -629,6 +629,16 @@ def test_a_coordinate_question_without_a_camera_asks_which_one(tmp_path: Path) -
     assert "living_room" in verdict["camera_candidates"]
 
 
+def test_cameras_are_named_the_same_way_the_picture_feature_names_them() -> None:
+    """One camera vocabulary, not two: these are discord_bot.snapshot.aliases."""
+    assert queries.resolve_cameras("沙发 (0.5, 0.5)") == ["sofa"]
+    assert queries.resolve_cameras("客厅地板上 (0.5, 0.5)") == ["living_room"]
+    assert queries.resolve_cameras("喂食器 (0.5, 0.5)") == ["feeder"]
+    assert queries.resolve_cameras("feeder (0.5, 0.5)") == ["feeder"]
+    # Two rooms in one message is genuinely two different places, so both come back.
+    assert sorted(queries.resolve_cameras("客厅和沙发 (0.5, 0.5)")) == ["living_room", "sofa"]
+
+
 def test_the_point_tool_is_registered_and_dispatchable(tmp_path: Path) -> None:
     database = seed_observations(tmp_path / "history.db", [(0, "kurumi", "living_room", 0.5, 0.5)])
     names = {tool["function"]["name"] for tool in queries.tools_schema()}

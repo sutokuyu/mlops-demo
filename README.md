@@ -521,8 +521,10 @@ detection box (its bottom centre is the same anchor), so the whole history is
 queryable without a backfill.
 
 The bot understands this too: a message naming a coordinate (`客厅地板上 (0.6, 0.5)`)
-is answered from `point_stay`, via `report.camera_aliases` (客厅 = `living_room`). When
-a coordinate is given without a camera the bot asks which one rather than guessing.
+is answered from `point_stay`. Which words mean which camera is the *same* list the
+snapshot feature uses, `discord_bot.snapshot.aliases` (客厅/沙发/喂食器...), so there is
+one camera vocabulary to maintain. When a coordinate is given without a camera the bot
+asks which one rather than guessing.
 
 ### 10. Run it 24/7
 
