@@ -1,6 +1,7 @@
 """Sample the cameras periodically and record where each cat is staying."""
 
 import argparse
+import signal
 import sys
 import threading
 import time
@@ -791,11 +792,21 @@ def maybe_recover_camera(
     tracker.discovery_thread.start()
 
 
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    raise KeyboardInterrupt
+
+
 def run(args) -> None:
     if not args.model.is_file():
         raise FileNotFoundError(f"Identity detection model not found: {args.model}")
     if args.interval <= 0:
         raise ValueError("--interval must be greater than 0")
+
+    # systemd's unit sends SIGINT (KillSignal=SIGINT), which Python already turns into
+    # KeyboardInterrupt, so the except/finally below closes any open visit. launchd has
+    # no equivalent per-job setting and stops a job with SIGTERM instead, so the same
+    # path is wired up here too - otherwise a visit left open at shutdown never closes.
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     if args.camera_names:
         selected = [name for name in configured_cameras() if name in args.camera_names]

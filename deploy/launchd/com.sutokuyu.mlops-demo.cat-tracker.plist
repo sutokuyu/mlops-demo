@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Cat location tracker (samples the room cameras and records visits).
+
+launchd equivalent of deploy/systemd/cat-tracker.service. __PROJECT_ROOT__ and
+__LOG_DIR__ are filled in by scripts/install_services_macos.sh - launchd plists,
+unlike systemd units, cannot expand %h or $HOME themselves.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutokuyu.mlops-demo.cat-tracker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_ROOT__/scripts/run_tracker.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Cameras drop out and transient hiccups happen; recover without a human,
+         like the systemd unit's Restart=always. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <!-- Mirrors RestartSec=10 on the systemd side. launchd has no StartLimitBurst
+         equivalent, so a persistently broken startup restarts every 10s instead of
+         giving up after 10 tries - annoying in the log, but not harmful. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <!-- Sampling every few seconds leaves the CPU idle most of the time; stay out of
+         the way of anything interactive, like the systemd unit's Nice=5. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/cat-tracker.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/cat-tracker.log</string>
+</dict>
+</plist>

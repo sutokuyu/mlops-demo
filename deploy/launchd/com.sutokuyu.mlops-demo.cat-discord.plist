@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Discord bot that answers cat-report questions in a channel.
+
+launchd equivalent of deploy/systemd/cat-discord.service. __PROJECT_ROOT__ and
+__LOG_DIR__ are filled in by scripts/install_services_macos.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutokuyu.mlops-demo.cat-discord</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_ROOT__/scripts/run_discord_bot.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- The Gateway connection drops (network blips, Discord restarts); reconnect
+         without a human, like the systemd unit's Restart=always. A bad token or an
+         empty allowlist restarting forever is the same risk the systemd unit's
+         StartLimitIntervalSec/StartLimitBurst guards against - launchd has no direct
+         equivalent, so ThrottleInterval is the closest approximation: it will not
+         stop retrying, but it will not hammer Discord's login endpoint either. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <!-- Reading a database and waiting on an HTTP reply: never in the way of
+         anything, like the systemd unit's Nice=10. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/cat-discord.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/cat-discord.log</string>
+</dict>
+</plist>

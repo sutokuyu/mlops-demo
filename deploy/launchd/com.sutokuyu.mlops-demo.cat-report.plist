@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Daily cat location summary sent to Discord, just after midnight.
+
+launchd equivalent of deploy/systemd/cat-report.service + cat-report.timer.
+__PROJECT_ROOT__ and __LOG_DIR__ are filled in by
+scripts/install_services_macos.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutokuyu.mlops-demo.cat-report</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_ROOT__/scripts/daily_report.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+    <!-- The report summarizes the day that just ended, so it fires on the day
+         boundary, matching the systemd timer's OnCalendar=*-*-* 00:00:00. launchd
+         runs a missed StartCalendarInterval job on the next wake by itself (a Mac
+         mini is normally awake, but this also covers it being asleep at midnight),
+         the same guarantee as the systemd timer's Persistent=true. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>0</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/cat-report.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/cat-report.log</string>
+</dict>
+</plist>

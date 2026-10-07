@@ -62,7 +62,8 @@ location_tracker.py ──► data/location_history.db
 | `configs/config.yaml` | Cameras, model paths, training defaults |
 | `configs/locations.yaml` | Tracking loop, alignment, preview, report, Discord bot |
 | `configs/zones.yaml` | Zone polygons, written by the tools |
-| `deploy/systemd/` | Units for the 24/7 tracker, the daily report and the Discord bot |
+| `deploy/systemd/` | systemd user units for the 24/7 tracker, the daily report and the Discord bot (Linux) |
+| `deploy/launchd/` | launchd agent plists for the same jobs (macOS) |
 | `scripts/` | Shell wrappers and a demo-day generator |
 
 ### Entry points
@@ -573,6 +574,38 @@ Two details worth knowing:
 
 After editing a unit file, `systemctl --user daemon-reload` then restart. Editing
 `scripts/run_tracker.sh` only needs a restart.
+
+#### macOS (e.g. a Mac mini M2)
+
+`deploy/launchd/` holds the same four jobs as launchd agents (there is no separate
+timer unit on launchd; `cat-report` and `cat-camera-ip` schedule themselves in
+their own plist).
+
+```bash
+scripts/install_services_macos.sh              # generate plists, bootstrap, start
+scripts/install_services_macos.sh --uninstall
+```
+
+```bash
+launchctl print gui/$(id -u)/com.sutokuyu.mlops-demo.cat-tracker
+tail -f ~/Library/Logs/mlops-demo/cat-tracker.log
+launchctl kickstart -k gui/$(id -u)/com.sutokuyu.mlops-demo.cat-report   # send one now, to test
+tail -f ~/Library/Logs/mlops-demo/cat-discord.log                       # live bot log
+```
+
+Two details worth knowing:
+
+- **These are LaunchAgents, not LaunchDaemons**: they only run while someone is
+  logged in. For a Mac mini acting as a headless box, enable automatic login
+  (System Settings > Users & Groups > Login Options) and stop it sleeping
+  (`sudo pmset -a sleep 0`, or System Settings > Energy) - otherwise the tracker
+  stops recording whenever the screen locks or the machine sleeps.
+- **`configs/config.yaml` `training.device` and `configs/locations.yaml`
+  `tracking.device` default to `mps`** (Apple Silicon's GPU backend) on this
+  branch, instead of the CUDA device index (e.g. `0`) used on an nvidia box. Fall
+  back to `cpu` for any op Ultralytics does not yet support on `mps`.
+
+After editing a plist, re-run `install_services_macos.sh` to pick it up.
 
 ## Configuration
 

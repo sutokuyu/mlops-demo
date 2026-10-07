@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Re-locate the cat cameras and fix their addresses in .env.
+
+launchd equivalent of deploy/systemd/cat-camera-ip.service +
+cat-camera-ip.timer. __PROJECT_ROOT__ and __LOG_DIR__ are filled in by
+scripts/install_services_macos.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutokuyu.mlops-demo.cat-camera-ip</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_ROOT__/.venv/bin/python</string>
+        <string>__PROJECT_ROOT__/scripts/sync_camera_ips.py</string>
+        <string>--apply</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+    <!-- RunAtLoad covers the systemd timer's OnBootSec=3min (close enough - this job
+         stands down on its own while the tracker is already running, see
+         sync_camera_ips.py tracker_is_running). StartInterval covers
+         OnUnitActiveSec=5min. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/cat-camera-ip.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/cat-camera-ip.log</string>
+</dict>
+</plist>

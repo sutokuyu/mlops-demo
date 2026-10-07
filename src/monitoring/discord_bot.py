@@ -24,6 +24,7 @@ an object that quacks like ``discord.Message``.
 import argparse
 import asyncio
 import json
+import platform
 import re
 import sys
 import urllib.error
@@ -308,12 +309,21 @@ def mentions_the_bot(message, bot_id: int | None) -> bool:
     return False
 
 
+def _log_hint() -> str:
+    """Where to look for the stack trace behind a one-line error reply.
+
+    systemd and launchd keep the service log in different places, and telling a Mac
+    owner to run journalctl (or a Linux owner to open Console.app) would just send
+    them looking in the wrong tool.
+    """
+    if platform.system() == "Darwin":
+        return "数据没丢，细节在 ~/Library/Logs/mlops-demo/cat-discord.log 里。"
+    return "数据没丢，细节在 journalctl --user -u cat-discord 里。"
+
+
 def format_failure(day: date, error: Exception) -> str:
     """What to say when the data itself could not be read."""
-    return (
-        f"{day.isoformat()} 的记录本鱼没翻出来：{error}\n"
-        "数据没丢，细节在 journalctl --user -u cat-discord 里。"
-    )
+    return f"{day.isoformat()} 的记录本鱼没翻出来：{error}\n{_log_hint()}"
 
 
 def answer_from_the_data(
@@ -497,9 +507,7 @@ def build_snapshot_reply(content: str, settings: BotSettings, cache=None) -> Sna
         return build_snapshot(content, settings=settings.snapshot, cache=cache)
     except Exception as error:  # the bot must answer, whatever broke
         print(f"discord_bot: snapshot failed: {error}", file=sys.stderr)
-        return SnapshotReply(
-            f"这张画面没弄出来：{error}\n细节在 journalctl --user -u cat-discord 里。"
-        )
+        return SnapshotReply(f"这张画面没弄出来：{error}\n{_log_hint()}")
 
 
 def discord_file(path):

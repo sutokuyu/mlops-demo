@@ -32,6 +32,8 @@ Exit codes:
 
 import argparse
 import fcntl
+import platform
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -42,6 +44,9 @@ DEFAULT_ENV = PROJECT_ROOT / ".env"
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 LOCK_PATH = PROJECT_ROOT / "data" / "camera-lookup.lock"
 TRACKER_UNIT = "cat-tracker.service"
+# launchd has no per-unit "is-active": a job can be loaded (bootstrapped) without a
+# live PID, e.g. between KeepAlive restarts. See deploy/launchd/ for the plist.
+TRACKER_LAUNCHD_LABEL = "com.sutokuyu.mlops-demo.cat-tracker"
 
 # .env at module level, before anything can read the config: the config substitutes
 # ${VAR} from the environment at import time, so loading it inside main() would be too
@@ -55,12 +60,32 @@ from src.config_loader import load_env_file
 load_env_file()
 
 
-def tracker_is_running(unit: str = TRACKER_UNIT) -> bool:
+def tracker_is_running(
+    unit: str = TRACKER_UNIT, launchd_label: str = TRACKER_LAUNCHD_LABEL
+) -> bool:
     """True while the recorder is active, so the lookup can stand down.
 
-    Anything that is not a definite "active" counts as not running: with no systemd
-    there is nothing to compete with, and refusing to look would be worse than looking.
+    Anything that is not a definite "running" counts as not running: with no
+    systemd/launchd there is nothing to compete with, and refusing to look would be
+    worse than looking.
     """
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["launchctl", "list", launchd_label],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode != 0:
+            return False
+        # A loaded-but-not-running job (e.g. between KeepAlive restarts) omits the
+        # "PID" key entirely rather than printing a placeholder, unlike systemd.
+        return bool(re.search(r'"PID"\s*=\s*\d+;', result.stdout))
+
     try:
         result = subprocess.run(
             ["systemctl", "--user", "is-active", unit],
