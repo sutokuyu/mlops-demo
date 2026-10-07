@@ -29,11 +29,12 @@ identity_collection:
 
 # The trainer's default device. Inference picks its device from
 # locations.yaml tracking.device instead, so all three runtime tools agree.
-# "mps" is Apple Silicon's GPU (Metal) backend, picked up by Ultralytics the same
-# way an nvidia index like 0 is on Linux. Override with --device cpu if a given
-# torch/ultralytics build does not support mps for a particular op.
+# "auto" (resolve_device in src/config_loader.py) picks cuda if torch sees a GPU,
+# else Apple Silicon's "mps" backend, else cpu - so the same file works on an
+# nvidia box (WSL, a Linux server) and on a Mac mini without editing it per
+# machine. Set an explicit value (e.g. "cpu", "0", "mps") to override detection.
 training:
-  device: mps
+  device: auto
   identity_detection_dataset: dataset/data.yaml
   identity_detection_epochs: 50
   identity_detection_imgsz: 640

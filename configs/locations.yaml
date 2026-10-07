@@ -75,9 +75,10 @@ tracking:
   imgsz: 640
   # Inference device, shared by the tracker, realtime_view and the browser preview.
   # The trainer has its own default under config.yaml training.device.
-  # "mps" is Apple Silicon's GPU backend (Mac mini M2); use an nvidia index like 0
-  # instead when running on a CUDA box.
-  device: mps
+  # "auto" (resolve_device in src/config_loader.py) picks cuda/mps/cpu by whatever
+  # this machine actually has, so the same file works on WSL/a CUDA box and on a
+  # Mac mini without editing it per machine. Set an explicit value to override.
+  device: auto
   # box 的哪个部位用来查 zone。
   #   bottom_center - 只用底边中点（旧行为）。猫踩在地面上时准确，但尾巴或
   #                   伸出去的腿会把框底拉低，锚点就落到错的 zone 或者落空。

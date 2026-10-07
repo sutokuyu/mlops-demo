@@ -90,3 +90,24 @@ def resolve_config_path(path_value: str | Path) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def resolve_device(value: Any) -> Any:
+    """Turn a config "auto" device into whichever accelerator torch can see.
+
+    A literal device (``0``, ``"cpu"``, ``"mps"``, ``"0,1"``...) is returned
+    unchanged - this only resolves the one value the config files actually use
+    across machines, so the same ``configs/*.yaml`` works on an nvidia box and on
+    Apple Silicon without hand-editing it per machine. torch is imported inside the
+    function rather than at module level, so importing config_loader - e.g. for
+    sync_camera_ips.py's lightweight preflight - never pays for it.
+    """
+    if not isinstance(value, str) or value.strip().lower() != "auto":
+        return value
+    import torch
+
+    if torch.cuda.is_available():
+        return 0
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"

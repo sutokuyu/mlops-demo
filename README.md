@@ -600,10 +600,12 @@ Two details worth knowing:
   (System Settings > Users & Groups > Login Options) and stop it sleeping
   (`sudo pmset -a sleep 0`, or System Settings > Energy) - otherwise the tracker
   stops recording whenever the screen locks or the machine sleeps.
-- **`configs/config.yaml` `training.device` and `configs/locations.yaml`
-  `tracking.device` default to `mps`** (Apple Silicon's GPU backend) on this
-  branch, instead of the CUDA device index (e.g. `0`) used on an nvidia box. Fall
-  back to `cpu` for any op Ultralytics does not yet support on `mps`.
+- **`training.device` and `tracking.device` both default to `auto`**, resolved at
+  startup (see `resolve_device` in `src/config_loader.py`) to cuda if torch sees a
+  GPU, else Apple Silicon's `mps`, else `cpu` - the same `configs/*.yaml` works
+  unedited on WSL/a CUDA box and on a Mac mini. Pass `--device cpu` for any op
+  Ultralytics does not yet support on `mps`, or set an explicit value in the YAML
+  to pin one machine to a particular device.
 
 After editing a plist, re-run `install_services_macos.sh` to pick it up.
 

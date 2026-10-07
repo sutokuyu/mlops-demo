@@ -26,13 +26,15 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, load_env_file, resolve_config_path
+from src.config_loader import load_config, load_env_file, resolve_config_path, resolve_device
 
 # Before anything that reads the config: it substitutes ${VAR} from the environment at
 # import time, and the camera URLs are the whole point of this script.
 load_env_file()
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
+# "auto" in the YAML picks cuda/mps/cpu by whatever this machine actually has.
+CONFIG["training"]["device"] = resolve_device(CONFIG["training"].get("device"))
 COLLECTION_CONFIG = CONFIG["identity_collection"]
 IDENTITY_MODEL_PATH = resolve_config_path(CONFIG["models"]["identity_detection_model_path"])
 EXPECTED_CLASSES = {0: "bagel", 1: "kurumi"}

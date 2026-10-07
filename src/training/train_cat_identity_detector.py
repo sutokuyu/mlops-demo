@@ -18,7 +18,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, load_env_file, resolve_config_path
+from src.config_loader import load_config, load_env_file, resolve_config_path, resolve_device
 
 # Before anything that reads the config: it substitutes ${VAR} from the environment at
 # import time.
@@ -26,6 +26,8 @@ load_env_file()
 
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 TRAINING_CONFIG = CONFIG["training"]
+# "auto" in the YAML picks cuda/mps/cpu by whatever this machine actually has.
+TRAINING_CONFIG["device"] = resolve_device(TRAINING_CONFIG.get("device"))
 
 
 def parse_args(argv=None):

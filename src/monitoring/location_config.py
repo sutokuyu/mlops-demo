@@ -16,7 +16,7 @@ PROJECT_ROOT = _resolve_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config_loader import load_config, resolve_config_path
+from src.config_loader import load_config, resolve_config_path, resolve_device
 from src.monitoring.alignment import (
     DEFAULT_MIN_ROTATION_DEG,
     DEFAULT_MIN_SCALE_DELTA,
@@ -26,6 +26,10 @@ from src.monitoring.alignment import (
 CONFIG = load_config(PROJECT_ROOT / "configs" / "config.yaml")
 LOCATION_CONFIG = load_config(PROJECT_ROOT / "configs" / "locations.yaml")
 TRACKING_CONFIG = LOCATION_CONFIG["tracking"]
+# "auto" in the YAML picks cuda/mps/cpu by whatever this machine actually has, so
+# the tracker, realtime_view and the browser preview agree without editing the
+# config per machine (see resolve_device).
+TRACKING_CONFIG["device"] = resolve_device(TRACKING_CONFIG.get("device"))
 ALIGNMENT_CONFIG = LOCATION_CONFIG.get("alignment", {})
 CALIBRATION_CONFIG = LOCATION_CONFIG.get("calibration", {})
 REPORT_CONFIG = LOCATION_CONFIG.get("report", {})
