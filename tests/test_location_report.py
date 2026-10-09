@@ -634,11 +634,11 @@ def test_the_events_block_says_the_toilet_is_missing_from_the_timeline() -> None
 # Feeding cannot use the toilet rule ("went in and came out" = two appearances):
 # one three-minute stay is a meal, so the discriminator is the dwell time.
 
-FEEDING_ZONES = {"feeder_1", "wet_food_bowl_1"}
+FEEDING_ZONES = {"feeder", "wet_food_bowl_1"}
 WATER_ZONES = {"water_server"}
 
 
-def meal(seconds: float, zone: str = "feeder_1", duration: float = 180.0) -> object:
+def meal(seconds: float, zone: str = "feeder", duration: float = 180.0) -> object:
     return as_visit(sighting(seconds, zone=zone, end=duration))
 
 
@@ -647,7 +647,7 @@ def test_a_long_enough_stay_at_the_feeder_is_a_meal() -> None:
 
     assert len(events) == 1
     assert events[0]["kind"] == "meal"
-    assert events[0]["zones"] == ["feeder_1"]
+    assert events[0]["zones"] == ["feeder"]
     assert events[0]["minutes"] == pytest.approx(3.0)
 
 
@@ -659,13 +659,13 @@ def test_a_pass_by_is_not_a_meal() -> None:
 def test_moving_between_the_feeder_and_a_bowl_is_one_meal() -> None:
     """Stepping between dishes is one sitting, not two meals."""
     visits = [
-        meal(0, zone="feeder_1", duration=120.0),
+        meal(0, zone="feeder", duration=120.0),
         meal(180, zone="wet_food_bowl_1", duration=90.0),
     ]
 
     events = feeding_events(visits, FEEDING_ZONES, 30.0, 120.0, "meal")
     assert len(events) == 1
-    assert events[0]["zones"] == ["feeder_1", "wet_food_bowl_1"]
+    assert events[0]["zones"] == ["feeder", "wet_food_bowl_1"]
     assert events[0]["minutes"] == pytest.approx(3.5)
 
 
@@ -703,7 +703,7 @@ def test_both_cats_are_judged_by_the_same_rule(tmp_path: Path) -> None:
     database = tmp_path / "history.db"
     store = LocationStore(database)
     for cat, offset in (("bagel", 600), ("kurumi", 900)):
-        visit_id = store.open_visit(start_ts + offset, cat, "feeder", "feeder_1", 0.9)
+        visit_id = store.open_visit(start_ts + offset, cat, "feeder", "feeder", 0.9)
         store.touch_visit(visit_id, start_ts + offset + 240, 3, 0.9)
     store.close()
 
@@ -728,7 +728,7 @@ def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(
 
     database = tmp_path / "history.db"
     store = LocationStore(database)
-    visit_id = store.open_visit(start_ts + 60, "bagel", "feeder", "feeder_1", 0.9)
+    visit_id = store.open_visit(start_ts + 60, "bagel", "feeder", "feeder", 0.9)
     store.touch_visit(visit_id, start_ts + 300, 3, 0.9)
     # A toilet sighting in the same day, which IS removed.
     toilet = store.open_visit(start_ts + 900, "bagel", "feeder", "toilet_1", 0.9)
@@ -739,7 +739,7 @@ def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(
 
     bagel = build_summary(day, database)["cats"][0]
     assert [event["kind"] for event in bagel["events"]] == ["toilet_use", "meal"]
-    assert "feeder_1" in [entry["zone"] for entry in bagel["timeline"]]
+    assert "feeder" in [entry["zone"] for entry in bagel["timeline"]]
     assert "toilet_1" not in [entry["zone"] for entry in bagel["timeline"]]
 
 

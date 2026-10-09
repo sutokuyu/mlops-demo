@@ -378,7 +378,7 @@ def feeding_events(
     meal, and a cat trotting past is not, so the discriminator is the dwell time.
 
     Groups are merged by the gap between one visit's end and the next one's start,
-    and a group may span zones - stepping from `feeder_1` to `wet_food_bowl_1`, or
+    and a group may span zones - stepping from `feeder` to `wet_food_bowl_1`, or
     pausing at the water server, is one meal. That is deliberately looser than the
     toilet rule, which is cut by any other location: leaving the feeder for two
     minutes and coming back is the same sitting, whereas leaving the litter box and

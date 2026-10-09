@@ -260,7 +260,7 @@ report:
     # 一只是「吃了」、另一只是「只蹲了会儿」。吃什么算吃是一条定义，
     # 定义必须写在代码里，不能交给模型临时决定。
     feeding_zones:
-      - feeder_1
+      - feeder
       - wet_food_bowl_1
       - wet_food_bowl_2
     water_zones:
