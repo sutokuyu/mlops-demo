@@ -47,6 +47,7 @@ location_tracker.py ──► data/location_history.db
    ├── realtime_view.py       │  where is the cat, right now
    ├── discord_bot.py ────────┤  "报告一下今天两只猫都做什么了" (inbound)
    ├── snapshot.py            │  "@bot 沙发" ──► one frame, zones drawn
+   │                          │  "沙发参考图" ──► one frame, 0-100 tick grid
    ├── location_queries.py    │  "进过水池吗" ──► counted in code, as callable tools
    └── location_report.py ────┘  what happened today ──► Discord (webhook)
 ```
@@ -394,11 +395,22 @@ Then say this in the channel:
 `monitoring/discord_bot.py` reads the day's visits with the same
 `build_summary()` the daily report uses, hands your own words to the LLM as the
 `question` block, and replies in the channel. Only messages containing a trigger
-from `discord_bot.triggers` are answered, and bot accounts are ignored (the reply
-quotes the question back, so answering a bot would loop).
+from `discord_bot.triggers` are answered, **or a real @mention** - and a mention with
+nothing else in it answers with a fixed help message listing everything the bot can do
+(`discord_bot.help_triggers` reaches the same reply, and `discord_bot.help_text`
+replaces the generated wording). The help text is assembled from the configuration, so
+it cannot go stale when a trigger word or a camera is renamed. Bot accounts are ignored
+(the reply quotes the question back, so answering a bot would loop).
 
-- `昨天` / `yesterday` and `前天` ask about other days; otherwise
+- `昨天` / `yesterday` and `前天` ask about other days, and a date written out loud
+  (`10月8号`, `2026-10-08`) pins the day outright; otherwise
   `discord_bot.days_ago` (0 = today) decides.
+- A message that asks about **one thing** is answered as one thing. If it names a place
+  or a coordinate, names a cat, or asks about a routine (吃饭 / 喝水 / 厕所 / 猫砂), the
+  reply uses `FOCUS` instead of the day's `TASK` and ships the summary with the per-cat
+  `timeline` removed - the timeline is nearly all of the payload and is what the model
+  recapped from. Measured 2026-10-10: "bagel 今天吃饭没" answered the meal and then
+  reviewed the whole day. A request for the day ("汇报一下今天情况") is unchanged.
 - `allowed_channel_ids` / `allowed_user_ids` restrict who can spend an LLM call.
   Empty means *no restriction*, so set them.
 - Two fallbacks keep the bot from going silent: if the data cannot be read it
@@ -436,6 +448,22 @@ The bot holds one stream per camera while you keep asking and releases it
 session costs one extra session on the relay rather than one per message. The
 camera address is re-read from `.env` per request, so a camera the tracker has
 relocated is found without restarting the bot.
+
+#### Ask for a coordinate reference picture
+
+Asking for the reference picture gives the same live frame with a **0-100 tick grid**
+drawn on it, so a coordinate can be read off the picture and typed back:
+
+```
+沙发参考图
+feeder 刻度图
+```
+
+Any word from `discord_bot.snapshot.grid_triggers` asks for it, and the grid is drawn
+every `discord_bot.snapshot.grid_step` units (10 by default). The scale is deliberately
+the one the questions speak - `location_queries.parse_point()` reads x/y as 0-100 - so
+the number printed on a line is the number to type back, and the frame's four edges are
+0 and 100. A report trigger still wins, so `报告 参考图` stays a report.
 
 #### Ask about a place
 
@@ -530,6 +558,16 @@ is answered from `point_stay`. Which words mean which camera is the *same* list 
 snapshot feature uses, `discord_bot.snapshot.aliases` (客厅/沙发/喂食器...), so there is
 one camera vocabulary to maintain. When a coordinate is given without a camera the bot
 asks which one rather than guessing.
+
+The `x`/`y` label is what makes a pair of numbers a coordinate, and the separator is
+optional, so `sofa的x30，y70附近` and `sofa x=30 y=70` both work. "sofa 30,70" does not
+- two bare numbers are as likely to be a date or a duration, and guessing would be
+worse than falling back to the report. A floor on the length of a stay is read from the
+question too: `超过5秒钟` / `至少2分钟` becomes `min_seconds`, and each stay reports its
+`seconds` (the span between the first and last detection) as well as its minutes, so
+`dropped_below_min_seconds` can say that shorter sightings existed instead of letting
+them read as nothing. One caveat worth knowing: a stay seen only once is 0 seconds long,
+so it cannot demonstrate a duration and a threshold drops it.
 
 The answer comes with a **live frame with the spot circled** (orange circle + crosshair,
 plus the radius it matched with), so an owner who meant a different place can see that
@@ -634,8 +672,8 @@ After editing a plist, re-run `install_services_macos.sh` to pick it up.
 | `report.zone_aliases` | Zone identifier → the words the owner uses for it (the shared vocabulary) |
 | `report.zone_groups` | A word that means several zones at once (e.g. 湿粮碗 = bowl 1 or 2) |
 | `report.query` | Limits for the code-computed answers (`max_stays`, `max_days`) |
-| `discord_bot` | Bot token, channel/user allowlists, trigger words, default day |
-| `discord_bot.snapshot` | Picture-request words, camera aliases, image size, how long a stream is held |
+| `discord_bot` | Bot token, channel/user allowlists, trigger words, help words, default day |
+| `discord_bot.snapshot` | Picture and reference-picture words, camera aliases, grid step, image size, how long a stream is held |
 
 ### Prompt Layers
 

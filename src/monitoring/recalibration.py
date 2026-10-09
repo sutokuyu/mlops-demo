@@ -65,6 +65,9 @@ from src.monitoring.rtsp_stream import StreamReader
 ZONE_COLOR = (0, 255, 0)
 OFF_FRAME_COLOR = (0, 0, 255)
 HEADER_COLOR = (0, 200, 255)
+# Height of the black bar render_overlay() draws across the top. Exported because the
+# coordinate grid has to keep its lines out of it.
+HEADER_HEIGHT = 34
 
 
 @dataclass
@@ -94,7 +97,7 @@ def overlay_zone(frame, zone: Zone, off_frame: bool) -> None:
 def render_overlay(frame: np.ndarray, zones: list[Zone], header: str, subheader: str = ""):
     canvas = frame.copy()
     width = canvas.shape[1]
-    cv2.rectangle(canvas, (0, 0), (width, 34), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (0, 0), (width, HEADER_HEIGHT), (0, 0, 0), -1)
     cv2.putText(
         canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, HEADER_COLOR, 2, cv2.LINE_AA
     )

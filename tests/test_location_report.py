@@ -19,6 +19,7 @@ import src.monitoring.location_report as location_report
 from src.monitoring.location_report import (
     DEFAULT_TEMPERATURE,
     EVENTS,
+    FOCUS,
     GROUNDING_RULES,
     MAX_QUESTION_CHARACTERS,
     MAX_REPORT_CHARACTERS,
@@ -307,12 +308,79 @@ def test_call_llm_puts_the_question_in_the_instruction(monkeypatch) -> None:
     assert captured["body"]["messages"][1]["content"] == '{"cats": []}'
 
 
+def test_a_focused_question_replaces_the_task_and_drops_the_timeline(monkeypatch) -> None:
+    """Two halves of one fix: the instruction and the payload.
+
+    Handing the model the whole day and asking one thing is what produced an answer
+    followed by a full recap (measured 2026-10-10, "bagel 今天吃饭没"). So the day's TASK
+    is replaced - keeping both in the prompt is a contradiction the model resolved by
+    doing both - and the per-cat timeline, which is nearly all of the payload, is gone.
+    """
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    summary = {
+        "date": "2026-10-10",
+        "cats": [
+            {
+                "cat": "bagel",
+                "events": [{"kind": "meal", "minutes": 3.0}],
+                "locations": [{"location": "on_sofa", "minutes": 10.0}],
+                "timeline": [{"location": "on_sofa", "start": "00:01:00"}],
+            }
+        ],
+    }
+    call_llm(summary, question="bagel 今天吃饭没", focus=True)
+
+    instruction = captured["body"]["messages"][0]["content"]
+    assert FOCUS in instruction
+    assert TASK not in instruction
+    body = json.loads(captured["body"]["messages"][1]["content"])
+    assert "timeline" not in body["cats"][0]
+    # What the question is about survives, or the answer would have nothing to use.
+    assert body["cats"][0]["events"] == [{"kind": "meal", "minutes": 3.0}]
+
+
+def test_the_daily_report_keeps_the_task_and_the_timeline(monkeypatch) -> None:
+    """The cron report has no question, so it must be untouched by FOCUS."""
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    summary = {"date": "2026-10-10", "cats": [{"cat": "bagel", "timeline": []}]}
+    call_llm(summary)
+
+    instruction = captured["body"]["messages"][0]["content"]
+    assert TASK in instruction
+    assert FOCUS not in instruction
+    assert "timeline" in captured["body"]["messages"][1]["content"]
+
+
 def test_compose_returns_the_llm_narrative_in_llm_mode(monkeypatch) -> None:
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: "喵喵喵",
+        lambda summary, temperature=None, question=None, query=None, focus=False: "喵喵喵",
     )
     assert location_report.compose({"cats": []}, "plain text") == "喵喵喵"
 
@@ -322,7 +390,7 @@ def test_compose_returns_the_plain_text_in_discord_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: pytest.fail(
+        lambda summary, temperature=None, question=None, query=None, focus=False: pytest.fail(
             "the LLM must not be called"
         ),
     )
@@ -335,7 +403,7 @@ def test_dry_run_posts_nothing(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: "喵",
+        lambda summary, temperature=None, question=None, query=None, focus=False: "喵",
     )
     monkeypatch.setattr(
         location_report,

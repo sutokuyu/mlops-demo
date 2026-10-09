@@ -147,6 +147,19 @@ QUESTION = (
 # would otherwise be able to push GROUNDING_RULES out of the model's attention.
 MAX_QUESTION_CHARACTERS = 200
 
+# Replaces TASK when the message asks one thing instead of for the day. It replaces
+# rather than appends on purpose: "report every location" and "answer only this" in
+# the same prompt is a contradiction, and the model resolved it by answering the
+# question and then recapping the whole day anyway. Measured 2026-10-10: "bagel 今天
+# 吃饭没" came back with the meal verdict followed by a full-day review nobody asked for.
+FOCUS = (
+    "The owner asked one specific question, quoted below. Answer exactly that question "
+    "and nothing else: do not summarise the day, do not list the cat's other locations, "
+    "and do not add any fact the question did not ask about. One short paragraph is "
+    "enough. When the question is about a meal, water or the toilet, answer from the "
+    "verdicts in `events` and give their times."
+)
+
 # The vocabulary the questions and the data must share. Measured on 2026-10-02: asked
 # "猫有没有进过水池" the bot answered "数据里没这个记录" while the database held four
 # `sink` stays that day, and answered correctly from the same data when the question used
@@ -180,7 +193,12 @@ QUERY = (
     "same coordinates - the bot keeps no state between messages. A coordinate answer's "
     "`stays` and "
     "`minutes_by_cat` are already the answer to 'which cat was there, and for how long' - "
-    "rank the cats by the minutes given, do not compare coordinates yourself."
+    "rank the cats by the minutes given, do not compare coordinates yourself. "
+    "`min_seconds` is the shortest stay that counts (0 or null means every stay does), "
+    "`seconds` is the span between the first and last detection, and when "
+    "`dropped_below_min_seconds` is above 0 there were shorter sightings too - say the "
+    "answer is about stays of at least `min_seconds`, so a sighting that was too short "
+    "is not silently reported as nothing."
 )
 
 # Deliberately not configurable. Models happily invent a plausible day when a
@@ -199,6 +217,7 @@ def build_instruction(
     question: str | None = None,
     query: dict | None = None,
     vocabulary: str | None = None,
+    focus: bool = False,
 ) -> str:
     """Compose the system prompt from tunable voice plus fixed requirements.
 
@@ -227,6 +246,9 @@ def build_instruction(
     derived from ``report.zone_aliases`` when not given, and it is always present: the
     daily report translates zone names too, and the same mismatch that made the bot deny
     a real ``sink`` record would just as easily mislabel the narrative.
+
+    ``focus`` swaps the day's TASK for :data:`FOCUS`, so a question about one thing is
+    answered as one thing instead of as a report with an answer in front of it.
     """
     config = REPORT_CONFIG["llm"]
     if persona is None:
@@ -246,7 +268,7 @@ def build_instruction(
 
     blocks = [
         persona.strip() or NEUTRAL_PERSONA,
-        TASK,
+        FOCUS if focus else TASK,
         question_block,
         QUERY if query else "",
         EVENTS,
@@ -647,23 +669,44 @@ def llm_temperature(override: float | None = None) -> float:
     return value
 
 
+def focused_payload(summary: dict) -> dict:
+    """The day's summary with each cat's timeline removed, for a question about one thing.
+
+    The timeline is nearly all of the payload (measured: 50,131 characters for one day,
+    189 rows for one cat alone) and it is also what the model recaps from. A question
+    that wants one fact needs the totals, the ``events`` verdicts and the code-computed
+    ``query`` - not every row of the day.
+    """
+    focused = dict(summary)
+    focused["cats"] = [
+        {key: value for key, value in cat.items() if key != "timeline"}
+        for cat in summary.get("cats", [])
+    ]
+    return focused
+
+
 def call_llm(
     summary: dict,
     temperature: float | None = None,
     question: str | None = None,
     query: dict | None = None,
+    focus: bool = False,
 ) -> str:
     llm = REPORT_CONFIG["llm"]
     if not llm["api_key"]:
         raise RuntimeError("report.llm.api_key is not configured")
     language = REPORT_CONFIG.get("language", "zh")
-    instruction = build_instruction(language, question=question, query=query)
+    instruction = build_instruction(language, question=question, query=query, focus=focus)
     # The computed answer rides along as one more JSON field, so the user message stays
     # pure data (the owner's own words never go here - the question only ever appears in
     # the system prompt, where it is capped).
     payload_summary = dict(summary)
     if query is not None:
         payload_summary["query"] = query
+    if focus:
+        # Shrinking the payload is half of the fix; the other half is FOCUS in the
+        # instruction. A model handed the whole day still finds something to recap.
+        payload_summary = focused_payload(payload_summary)
     payload = {
         "model": llm["model"],
         "temperature": llm_temperature(temperature),
@@ -722,6 +765,7 @@ def compose(
     temperature: float | None = None,
     question: str | None = None,
     query: dict | None = None,
+    focus: bool = False,
 ) -> str:
     """The outbound text, after any LLM rewriting for the configured mode.
 
@@ -730,10 +774,11 @@ def compose(
 
     ``question`` is only used by the Discord bot (and by any other caller that
     wants the narrative to answer something specific); the daily report leaves it
-    as ``None``. ``query`` is a code-computed answer attached to that question.
+    as ``None``. ``query`` is a code-computed answer attached to that question, and
+    ``focus`` says the question is about one thing, so the reply must not recap the day.
     """
     if REPORT_CONFIG.get("mode", "discord").lower() == "llm":
-        return call_llm(summary, temperature, question, query)
+        return call_llm(summary, temperature, question, query, focus)
     return text
 
 

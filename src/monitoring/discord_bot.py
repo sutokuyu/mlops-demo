@@ -46,7 +46,7 @@ from src.monitoring.location_config import (
     REPORT_CONFIG,
     configured_cameras,
 )
-from src.monitoring.location_queries import answer_question
+from src.monitoring.location_queries import answer_question, explicit_day, resolve_cats
 from src.monitoring.location_report import (
     DISCORD_MESSAGE_LIMIT,
     MAX_QUESTION_CHARACTERS,
@@ -57,14 +57,32 @@ from src.monitoring.location_report import (
 from src.monitoring.snapshot import (
     SnapshotReply,
     SnapshotSettings,
+    build_grid_snapshot,
     build_point_snapshot,
     build_snapshot,
     camera_only_reference,
+    describe_cameras,
     snapshot_settings,
 )
 
 DEFAULT_TRIGGERS = ("报告", "日报", "report")
 DEFAULT_DAYS_AGO = 0
+
+# Words that ask what the bot can do. A bare @mention does too - see is_help_request().
+DEFAULT_HELP_TRIGGERS = ("帮助", "怎么用", "能做什么", "你会什么", "help")
+
+# Words that make a message a question about one thing rather than a request for the
+# day: the meal/water/litter/sleep/play routines. A specific question gets a specific
+# answer, because handing the model the whole day and asking one thing made it answer
+# and then recap (measured 2026-10-10, "bagel 今天吃饭没"). See location_report.FOCUS.
+FOCUS_TOPICS = (
+    "吃",
+    "喝",
+    "厕所",
+    "猫砂",
+    "睡",
+    "玩",
+)
 
 # Asking about another day is a phrase, not a setting, so it is matched rather
 # than parsed: "昨天两只猫在干嘛" should not need a syntax.
@@ -124,6 +142,10 @@ class BotSettings:
     days_ago: int
     database: Path | None
     temperature: float | None
+    # How to ask what the bot can do: one of these words, or a bare @mention.
+    help_triggers: tuple[str, ...] = DEFAULT_HELP_TRIGGERS
+    # Set in the config to replace the generated help message verbatim.
+    help_text: str = ""
     # On-demand live frames. Defaulted so a BotSettings built by a test (or by an
     # older caller) still answers a snapshot request out of the box.
     snapshot: SnapshotSettings = field(default_factory=snapshot_settings)
@@ -155,9 +177,9 @@ def _numeric_ids(raw, field: str) -> frozenset[int]:
     return frozenset(ids)
 
 
-def _triggers(raw) -> tuple[str, ...]:
+def _triggers(raw, default: tuple[str, ...] = DEFAULT_TRIGGERS) -> tuple[str, ...]:
     if raw in (None, "", []):
-        return tuple(trigger.lower() for trigger in DEFAULT_TRIGGERS)
+        return tuple(trigger.lower() for trigger in default)
     if isinstance(raw, str):
         raw = [raw]
     return tuple(str(item).strip().lower() for item in raw if str(item).strip())
@@ -179,6 +201,8 @@ def bot_settings() -> BotSettings:
         days_ago=int(DISCORD_BOT_CONFIG.get("days_ago", DEFAULT_DAYS_AGO)),
         database=resolve_config_path(database) if database else None,
         temperature=float(temperature) if temperature is not None else None,
+        help_triggers=_triggers(DISCORD_BOT_CONFIG.get("help_triggers"), DEFAULT_HELP_TRIGGERS),
+        help_text=str(DISCORD_BOT_CONFIG.get("help_text") or ""),
         snapshot=snapshot_settings(),
     )
 
@@ -220,6 +244,81 @@ def message_question(content: str) -> str:
     return " ".join(without_mentions.split())[:MAX_QUESTION_CHARACTERS]
 
 
+def needs_focused_answer(content: str, verdict: dict | None) -> bool:
+    """Whether the message asks about one thing, so the reply must not recap the day.
+
+    Three signals, in the order the owner would expect them:
+
+    * a code-computed ``verdict`` was attached, which only happens when the message named
+      a place or a coordinate - that is a specific question by construction;
+    * the message names a cat ("bagel 今天怎么样"), which narrows it to that cat's day;
+    * it names a routine the owner asks about in one word (吃 / 喝 / 厕所 / 猫砂).
+
+    Everything else is a request for the day: "报告一下今天情况" and "今天两只猫都做什么了"
+    name no cat and no routine, and they have to keep getting the full report.
+    """
+    if verdict is not None:
+        return True
+    if resolve_cats(content):
+        return True
+    lowered = content.lower()
+    return any(topic in lowered for topic in FOCUS_TOPICS)
+
+
+def is_bare_mention(content: str) -> bool:
+    """True when nothing but mentions and punctuation was typed."""
+    residue = MENTION_PATTERN.sub(" ", content)
+    return not residue.strip(" \t\r\n，。、,.!！?？~～:：;；")
+
+
+def is_help_request(content: str, settings: BotSettings, *, mentioned_bot: bool = False) -> bool:
+    """Whether the message asks what the bot can do.
+
+    Two ways in: an explicit help word, or a bare @mention. The bare mention is the one
+    message with nothing to route on - it used to fall through to the picture branch (a
+    mention plus a camera name asks for a snapshot) and answer "要哪个相机的画面？", which
+    tells someone who has forgotten the syntax nothing at all. It is exactly the message
+    they type when they have forgotten it.
+
+    A report trigger still wins, so "报告怎么用" stays a report request.
+    """
+    if matches_trigger(content, settings.triggers):
+        return False
+    if matches_trigger(content, settings.help_triggers):
+        return True
+    return mentioned_bot and is_bare_mention(content)
+
+
+def help_text(settings: BotSettings) -> str:
+    """The fixed "how to talk to me" message.
+
+    Assembled from the configuration rather than written out, so it cannot go stale when
+    a trigger word or a camera is renamed - a help message that names a keyword the bot
+    no longer accepts is worse than no help at all. ``discord_bot.help_text`` replaces it
+    verbatim for anyone who wants to word it themselves.
+    """
+    if settings.help_text.strip():
+        return settings.help_text.strip()
+    reports = " / ".join(f"`{trigger}`" for trigger in settings.triggers)
+    pictures = " / ".join(f"`{word}`" for word in settings.snapshot.triggers[:3])
+    grid = settings.snapshot.grid_triggers[0] if settings.snapshot.grid_triggers else "参考图"
+    cameras = describe_cameras(configured_cameras(), settings.snapshot.aliases)
+    return "\n".join(
+        [
+            "本鱼在这儿，能干这些事 —— 直接在频道里说一句就行（**@本鱼** 一下也算）：",
+            f"• **一整天的情况**：{reports}，或者 `今天两只猫都做什么了`"
+            "（想看别的日子就说 `昨天` / `前天` / `10月8号`）",
+            "• **具体一件事**：`bagel 今天吃饭没`、`kurumi 有没有进过水池`、`今天谁去过猫砂盆`",
+            "• **某个点附近**：`sofa 的 x30 y70 附近谁待得久`"
+            "（坐标 0-100，横 x 纵 y；说 `待过` 是全部历史，加了时间词就只算那段时间）",
+            f"• **一张实时画面**：{pictures}，例如 `沙发画面`",
+            f"• **一张带刻度的参考图**（照着自己量坐标）：`沙发{grid}`",
+            f"相机有：{cameras}。",
+            "问具体的问题时本鱼只答那一件事；想要完整的一天，用上面的日报。",
+        ]
+    )
+
+
 def ignore_reason(
     content: str,
     *,
@@ -256,9 +355,15 @@ def ignore_reason(
         )
     if mentioned_bot:
         return None
-    # A picture request is answered too, so both trigger lists open the gate; which
-    # answer to send is then decided by is_snapshot_request().
-    triggers = settings.triggers + settings.snapshot.triggers
+    # A picture, a reference picture and a help request all open the gate the same way:
+    # they are all requests, and which answer to send is decided later by
+    # is_grid_request() / is_snapshot_request() / is_help_request().
+    triggers = (
+        settings.triggers
+        + settings.snapshot.triggers
+        + settings.snapshot.grid_triggers
+        + settings.help_triggers
+    )
     if not matches_trigger(content, triggers):
         return (
             f"no trigger word ({', '.join(triggers)}) in {content[:40]!r}, "
@@ -431,7 +536,11 @@ def build_answer(
     """
     settings = settings or bot_settings()
     offset = day_offset(content, settings.days_ago) if days_ago is None else days_ago
-    day = target_day(offset)
+    # A date written out loud ("10月8号") beats the word-based offset: it used to be
+    # ignored here, so a full-day question about a past day was answered with today's
+    # report, and only the code-computed query knew the real range.
+    named_day = explicit_day(content)
+    day = named_day if named_day is not None else target_day(offset)
     question = message_question(content)
 
     try:
@@ -444,6 +553,9 @@ def build_answer(
     verdict = answer_from_the_data(
         content, database=database if database is not None else settings.database
     )
+    # Measured 2026-10-10: asked one thing ("bagel 今天吃饭没"), the bot answered it and
+    # then recapped the whole day. A question about one thing gets one thing.
+    focus = needs_focused_answer(content, verdict)
     try:
         narrative = compose(
             summary,
@@ -451,6 +563,7 @@ def build_answer(
             temperature if temperature is not None else settings.temperature,
             question,
             verdict,
+            focus,
         )
     except REPORT_ERRORS as error:
         print(
@@ -472,6 +585,7 @@ def describe_settings(settings: BotSettings) -> str:
     users = ", ".join(str(item) for item in sorted(settings.allowed_user_ids)) or "any"
     return (
         f"triggers={settings.triggers} snapshot_triggers={settings.snapshot.triggers} "
+        f"grid_triggers={settings.snapshot.grid_triggers} help_triggers={settings.help_triggers} "
         f"default_day=days_ago:{settings.days_ago} channels={channels} users={users}"
     )
 
@@ -495,6 +609,17 @@ def is_snapshot_request(
     return camera_only_reference(content, configured_cameras(), settings.snapshot.aliases)
 
 
+def is_grid_request(content: str, settings: BotSettings) -> bool:
+    """Whether this message asks for the coordinate reference picture.
+
+    Checked before :func:`is_snapshot_request`: the grid words are their own list, and a
+    report trigger still wins over both ("报告 参考图" stays a report).
+    """
+    if matches_trigger(content, settings.triggers):
+        return False
+    return matches_trigger(content, settings.snapshot.grid_triggers)
+
+
 def build_snapshot_reply(content: str, settings: BotSettings, cache=None) -> SnapshotReply:
     """Blocking: grab one frame, draw the zones and write a JPEG.
 
@@ -510,11 +635,44 @@ def build_snapshot_reply(content: str, settings: BotSettings, cache=None) -> Sna
         return SnapshotReply(f"这张画面没弄出来：{error}\n{_log_hint()}")
 
 
+def build_grid_reply(content: str, settings: BotSettings, cache=None) -> SnapshotReply:
+    """Blocking: grab one frame and draw the 0-100 tick grid on it.
+
+    Separate from :func:`build_snapshot_reply` only in which builder it calls; a failure
+    still has to come back as a sentence, because a reply must arrive in the channel.
+    """
+    try:
+        return build_grid_snapshot(content, settings=settings.snapshot, cache=cache)
+    except Exception as error:  # the bot must answer, whatever broke
+        print(f"discord_bot: grid snapshot failed: {error}", file=sys.stderr)
+        return SnapshotReply(f"这张参考图没弄出来：{error}\n{_log_hint()}")
+
+
 def discord_file(path):
     """A ``discord.File`` for a local image - the second and last discord import."""
     import discord
 
     return discord.File(str(path))
+
+
+async def _answer_with_picture(message, builder, settings: BotSettings) -> None:
+    """Build one picture off the event loop, upload it, and drop the temp file.
+
+    Shared by the plain frame and the coordinate grid because the only difference is
+    which builder runs - while the upload, the typing indicator and the deletion of the
+    local file have to behave identically, and they are the parts that leak a temp file
+    if they ever diverge.
+    """
+    async with message.channel.typing():
+        reply = await asyncio.to_thread(builder, message.content, settings)
+    upload = {"file": discord_file(reply.image_path)} if reply.image_path else {}
+    try:
+        await message.reply(reply.caption, **upload)
+    finally:
+        # Discord holds the upload now, so a local temp file is just litter that would
+        # otherwise accumulate one per request.
+        if reply.image_path is not None:
+            Path(reply.image_path).unlink(missing_ok=True)
 
 
 async def handle_message(message, settings: BotSettings, bot_id: int | None = None) -> None:
@@ -545,21 +703,25 @@ async def handle_message(message, settings: BotSettings, bot_id: int | None = No
         )
         return
 
+    if is_help_request(message.content, settings, mentioned_bot=mentioned):
+        print(f"discord_bot: help requested by {message.author} in {message.channel}", flush=True)
+        await message.reply(help_text(settings))
+        return
+
+    if is_grid_request(message.content, settings):
+        print(
+            f"discord_bot: coordinate grid requested by {message.author} in {message.channel}",
+            flush=True,
+        )
+        await _answer_with_picture(message, build_grid_reply, settings)
+        return
+
     if is_snapshot_request(message.content, settings, mentioned_bot=mentioned):
         print(
             f"discord_bot: live frame requested by {message.author} in {message.channel}",
             flush=True,
         )
-        async with message.channel.typing():
-            reply = await asyncio.to_thread(build_snapshot_reply, message.content, settings)
-        upload = {"file": discord_file(reply.image_path)} if reply.image_path else {}
-        try:
-            await message.reply(reply.caption, **upload)
-        finally:
-            # Discord holds the upload now, so a local temp file is just litter that
-            # would otherwise accumulate one per request.
-            if reply.image_path is not None:
-                Path(reply.image_path).unlink(missing_ok=True)
+        await _answer_with_picture(message, build_snapshot_reply, settings)
         return
 
     print(

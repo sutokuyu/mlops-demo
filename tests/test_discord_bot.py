@@ -39,10 +39,13 @@ from src.monitoring.discord_bot import (
     describe_settings,
     format_failure,
     ignore_reason,
+    is_grid_request,
+    is_help_request,
     is_snapshot_request,
     matches_trigger,
     mentions_the_bot,
     message_question,
+    needs_focused_answer,
     should_respond,
     target_day,
     verify_discord_access,
@@ -370,7 +373,9 @@ def test_the_reply_is_the_days_summary(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: f"喵：{summary['date']}",
+        lambda summary, temperature=None, question=None, query=None, focus=False: (
+            f"喵：{summary['date']}"
+        ),
     )
 
     reply = build_reply("报告", settings=settings(), database=database_with_a_visit(tmp_path))
@@ -380,7 +385,7 @@ def test_the_reply_is_the_days_summary(monkeypatch, tmp_path: Path) -> None:
 def test_the_question_reaches_the_model(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 
-    def fake_call_llm(summary, temperature=None, question=None, query=None):
+    def fake_call_llm(summary, temperature=None, question=None, query=None, focus=False):
         captured["question"] = question
         captured["query"] = query
         return "喵"
@@ -405,7 +410,9 @@ def test_asking_for_yesterday_reads_yesterday(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: f"喵：{summary['date']}",
+        lambda summary, temperature=None, question=None, query=None, focus=False: (
+            f"喵：{summary['date']}"
+        ),
     )
 
     reply = build_reply(
@@ -422,7 +429,7 @@ def test_a_failing_llm_still_sends_the_numbers(monkeypatch, tmp_path: Path) -> N
     it is a better answer than an apology.
     """
 
-    def explode(summary, temperature=None, question=None, query=None):
+    def explode(summary, temperature=None, question=None, query=None, focus=False):
         raise location_report.DeliveryError("502 Bad Gateway: upstream is sad")
 
     monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
@@ -451,7 +458,7 @@ def test_a_reply_is_never_longer_than_discord_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         location_report,
         "call_llm",
-        lambda summary, temperature=None, question=None, query=None: "长" * 5000,
+        lambda summary, temperature=None, question=None, query=None, focus=False: "长" * 5000,
     )
 
     reply = build_reply("报告", settings=settings(), database=database_with_a_visit(tmp_path))
@@ -905,7 +912,7 @@ def test_a_place_question_is_counted_from_the_database(tmp_path: Path) -> None:
 def test_the_verdict_reaches_the_model_with_the_question(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 
-    def fake_call_llm(summary, temperature=None, question=None, query=None):
+    def fake_call_llm(summary, temperature=None, question=None, query=None, focus=False):
         captured["question"] = question
         captured["query"] = query
         return "喵"
@@ -1038,3 +1045,167 @@ def test_handle_message_uploads_the_marked_frame(monkeypatch, tmp_path: Path) ->
     assert message.replies == ["看这里"]
     assert message.uploads == [("file", str(image))]
     assert not image.exists(), "the temp file must be deleted once Discord has it"
+
+
+# --- a bare @mention asks what the bot can do ------------------------------
+#
+# A bare mention is the one message with nothing to route on, and it used to fall through
+# to the picture branch (a mention plus a camera name is how a snapshot is asked for) and
+# answer "要哪个相机的画面？" - which tells someone who has forgotten the syntax nothing.
+# It is exactly the message they type when they have forgotten it.
+
+
+def test_a_bare_mention_asks_what_the_bot_can_do() -> None:
+    assert is_help_request("<@7>", settings(), mentioned_bot=True)
+    assert is_help_request("<@7>   ", settings(), mentioned_bot=True)
+    assert is_help_request("帮助", settings())
+    assert is_help_request("help", settings())
+
+
+def test_a_question_that_merely_mentions_the_bot_is_not_a_help_request() -> None:
+    assert not is_help_request("<@7> 今天两只猫都做什么了", settings(), mentioned_bot=True)
+    assert not is_help_request("<@7> 沙发", settings(), mentioned_bot=True)
+    assert not is_help_request("<@7> 报告", settings(), mentioned_bot=True)
+
+
+def test_a_help_word_is_enough_to_be_answered_without_a_mention() -> None:
+    assert ignore_reason(**answerable(content="帮助")) is None
+    assert ignore_reason(**answerable(content="怎么用")) is None
+
+
+def test_the_help_message_describes_every_way_to_ask() -> None:
+    text = discord_bot.help_text(settings())
+    assert "报告" in text  # the day's report
+    assert "画面" in text  # a live frame
+    assert "参考图" in text  # the coordinate grid
+    assert "x30 y70" in text  # a coordinate question
+    # Built from the configuration, so it cannot name a camera that no longer exists.
+    for camera in ("living_room", "sofa", "feeder"):
+        assert camera in text
+
+
+def test_a_configured_help_text_replaces_the_generated_one() -> None:
+    configured = settings(help_text="问本鱼，本鱼不一定答。")
+    assert discord_bot.help_text(configured) == "问本鱼，本鱼不一定答。"
+
+
+def test_handle_message_answers_a_bare_mention_with_the_help(monkeypatch) -> None:
+    monkeypatch.setattr(
+        discord_bot, "build_snapshot_reply", lambda *a, **k: pytest.fail("not a picture")
+    )
+    monkeypatch.setattr(
+        discord_bot, "build_grid_reply", lambda *a, **k: pytest.fail("not a picture")
+    )
+    message = FakeMessage("<@7>", mentions=[SimpleNamespace(id=7)])
+
+    asyncio.run(discord_bot.handle_message(message, settings(), bot_id=7))
+
+    assert message.replies == [discord_bot.help_text(settings())]
+    assert message.uploads == [None]
+
+
+# --- the coordinate reference picture --------------------------------------
+
+
+def test_a_grid_word_asks_for_the_reference_picture() -> None:
+    assert is_grid_request("沙发参考图", picture_settings())
+    assert is_grid_request("feeder 刻度图", picture_settings())
+
+
+def test_the_plain_picture_and_the_grid_are_different_requests() -> None:
+    assert not is_grid_request("沙发画面", picture_settings())
+    assert not is_snapshot_request("沙发参考图", picture_settings())
+
+
+def test_a_report_trigger_wins_over_a_grid_word() -> None:
+    assert not is_grid_request("报告 参考图", picture_settings())
+
+
+def test_a_grid_trigger_is_enough_to_be_answered_without_a_mention() -> None:
+    assert ignore_reason(**answerable(content="feeder 刻度图")) is None
+
+
+def test_handle_message_uploads_the_reference_picture(monkeypatch, tmp_path: Path) -> None:
+    image = tmp_path / "grid.jpg"
+    image.write_bytes(b"jpeg-bytes")
+    monkeypatch.setattr(
+        discord_bot,
+        "build_grid_reply",
+        lambda content, settings, cache=None: SnapshotReply("刻度在这儿", image),
+    )
+    monkeypatch.setattr(discord_bot, "discord_file", lambda path: "FILE")
+
+    message = FakeMessage("沙发参考图")
+    asyncio.run(discord_bot.handle_message(message, picture_settings()))
+
+    assert message.replies == ["刻度在这儿"]
+    assert message.uploads == ["FILE"]
+    assert not image.exists(), "the temp file must be deleted once Discord has it"
+
+
+# --- one question gets one answer, not the day ------------------------------
+#
+# Measured 2026-10-10: asked "bagel 今天吃饭没", the bot answered the meal and then
+# recapped the whole day, because it was handed the whole day and TASK told it to cover
+# everything. A question about one thing now gets FOCUS instead of TASK, and a payload
+# without the per-cat timeline.
+
+
+def test_a_specific_question_is_not_a_request_for_the_day() -> None:
+    assert needs_focused_answer("bagel今天吃饭没", None)
+    assert needs_focused_answer("kurumi 有没有进过水池", None)  # a verdict is attached
+    assert needs_focused_answer("bagel 今天怎么样", None)  # names one cat
+    assert needs_focused_answer("今天谁去过猫砂盆", None)
+
+
+def test_a_request_for_the_day_keeps_the_full_report() -> None:
+    for content in ("汇报一下今天情况", "报告一下今天两只猫都做什么了", "今天两只猫都做什么了"):
+        assert not needs_focused_answer(content, None), content
+
+
+def focused_call(monkeypatch, captured: dict) -> None:
+    def fake_call_llm(summary, temperature=None, question=None, query=None, focus=False):
+        captured["summary"] = summary
+        captured["focus"] = focus
+        return "喵"
+
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "llm")
+    monkeypatch.setattr(location_report, "call_llm", fake_call_llm)
+
+
+def test_a_specific_question_is_sent_as_a_focused_answer(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    focused_call(monkeypatch, captured)
+
+    build_reply("bagel今天吃饭没", settings=settings(), database=database_with_a_visit(tmp_path))
+
+    # The trimming itself happens inside call_llm (see test_location_report); here the
+    # point is that the bot decided this question is about one thing.
+    assert captured["focus"] is True
+
+
+def test_the_daily_report_still_sends_the_timeline(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    focused_call(monkeypatch, captured)
+
+    build_reply("汇报一下今天情况", settings=settings(), database=database_with_a_visit(tmp_path))
+
+    assert captured["focus"] is False
+    assert "timeline" in captured["summary"]["cats"][0]
+
+
+def test_a_date_written_out_loud_picks_the_report_day(monkeypatch) -> None:
+    """It used to be ignored, so "10月8号猫都干啥了" was answered with today."""
+    captured: dict = {}
+    today = target_day(0)
+
+    def fake_summary(day, database=None):
+        captured["day"] = day
+        return {"date": day.isoformat(), "timezone": "Asia/Tokyo", "cats": []}
+
+    monkeypatch.setitem(location_report.REPORT_CONFIG, "mode", "discord")
+    monkeypatch.setattr(discord_bot, "build_summary", fake_summary)
+
+    build_reply("10月8号两只猫都干啥了", settings=settings())
+
+    assert captured["day"] == date(today.year, 10, 8)

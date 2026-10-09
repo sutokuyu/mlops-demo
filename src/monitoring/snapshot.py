@@ -66,7 +66,7 @@ from src.monitoring.location_config import (
     configured_cameras,
 )
 from src.monitoring.location_zones import Calibration, load_calibrations
-from src.monitoring.recalibration import reference_features_for, render_overlay
+from src.monitoring.recalibration import HEADER_HEIGHT, reference_features_for, render_overlay
 from src.monitoring.rtsp_stream import StreamReader
 
 # Words that ask for a picture. Deliberately NOT the report triggers ("报告/日报/report"):
@@ -86,6 +86,19 @@ DEFAULT_SNAPSHOT_TRIGGERS = (
     "picture",
 )
 
+# Words that ask for the coordinate reference picture: the live frame plus a 0-100
+# tick grid, so the owner can read a coordinate off it and type it back. A separate
+# list from the plain picture words because the two pictures answer different
+# questions - "沙发画面" is "is the camera aimed right", "沙发参考图" is "where is
+# x30 y70". "参考图" is also the word the owner already uses for it.
+DEFAULT_GRID_TRIGGERS = (
+    "参考图",
+    "刻度图",
+    "坐标图",
+    "坐标网格",
+    "grid",
+)
+
 # How a camera can be called in a message. The Chinese names are here because the
 # owner talks about rooms, not about config keys. Overridable per deployment under
 # ``discord_bot.snapshot.aliases``.
@@ -100,6 +113,10 @@ DEFAULT_ALIASES = {
 
 DEFAULT_MAX_WIDTH = 1280
 DEFAULT_JPEG_QUALITY = 80
+# Ticks every 10 units of the 0-100 scale the questions use (see
+# ``location_queries.parse_point``), so the numbers on the picture and the numbers the
+# owner types are the same numbers.
+DEFAULT_GRID_STEP = 10
 # Long enough that a slow re-ask does not re-dial the camera, short enough that an
 # abandoned aiming session is not one more stream held all night.
 DEFAULT_IDLE_TIMEOUT_SECONDS = 120.0
@@ -110,6 +127,13 @@ DEFAULT_FRAME_TIMEOUT_SECONDS = 20.0
 # The marker for the spot a point question asked about, in BGR. Deliberately not the
 # zone green: this is the answer's target, not a stored polygon.
 POINT_COLOR = (0, 140, 255)
+
+# The coordinate grid. Amber, and drawn faintly: it is there to be read off, and a
+# grid heavy enough to hide the cat would defeat the purpose of a live picture.
+GRID_COLOR = (0, 220, 255)
+GRID_TEXT_COLOR = (0, 220, 255)
+GRID_ALPHA = 0.35
+GRID_FONT_SCALE = 0.5
 
 MENTION_PATTERN = re.compile(r"<@[!&]?\d+>|@everyone|@here")
 
@@ -153,12 +177,15 @@ class SnapshotSettings:
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
     frame_timeout_seconds: float = DEFAULT_FRAME_TIMEOUT_SECONDS
+    grid_triggers: tuple[str, ...] = DEFAULT_GRID_TRIGGERS
+    grid_step: int = DEFAULT_GRID_STEP
 
 
 def snapshot_settings(config: dict | None = None) -> SnapshotSettings:
     """Read the ``discord_bot.snapshot`` block, falling back to the defaults above."""
     raw = (config if config is not None else SNAPSHOT_CONFIG) or {}
     triggers = raw.get("triggers")
+    grid_triggers = raw.get("grid_triggers")
     aliases = dict(DEFAULT_ALIASES)
     configured = raw.get("aliases")
     if isinstance(configured, Mapping):
@@ -176,6 +203,12 @@ def snapshot_settings(config: dict | None = None) -> SnapshotSettings:
         frame_timeout_seconds=float(
             raw.get("frame_timeout_seconds", DEFAULT_FRAME_TIMEOUT_SECONDS)
         ),
+        grid_triggers=(
+            DEFAULT_GRID_TRIGGERS
+            if grid_triggers in (None, "", [])
+            else tuple(str(item).strip() for item in grid_triggers if str(item).strip())
+        ),
+        grid_step=int(raw.get("grid_step", DEFAULT_GRID_STEP)),
     )
 
 
@@ -526,6 +559,141 @@ def build_snapshot(
         )
     else:
         lines.append("这个相机还没有画过区域，图上只有画面本身。")
+    lines.append(verdict)
+    return SnapshotReply("\n".join(lines), image_path)
+
+
+def _grid_label(image: np.ndarray, text: str, origin: tuple[int, int]) -> None:
+    """A tick number with a dark halo, so it reads on white furniture and black alike.
+
+    Measured on a real sofa frame: a bare amber digit disappears against the fridge and
+    the cabinets. Drawing it twice - thick black, then the colour - costs one call and
+    makes the number readable wherever the line lands.
+    """
+    cv2.putText(
+        image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, GRID_FONT_SCALE, (0, 0, 0), 3, cv2.LINE_AA
+    )
+    cv2.putText(
+        image,
+        text,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        GRID_FONT_SCALE,
+        GRID_TEXT_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def draw_grid(image: np.ndarray, step: int = DEFAULT_GRID_STEP, top: int = 0) -> None:
+    """Draw the 0-100 read-off grid the owner uses to type coordinates.
+
+    The scale is the one the questions speak (:func:`location_queries.parse_point` reads
+    x/y as 0-100), so the number printed on a line is the number the owner types back.
+    The lines are faint on purpose: a grid heavy enough to hide the cat would defeat the
+    point of a live picture.
+
+    Labels run along the bottom and the left edge, because the top of the frame is the
+    header bar and the alignment line. ``top`` is where the vertical lines may start, so
+    they do not stripe the header.
+    """
+    if step <= 0:
+        return
+    height, width = image.shape[:2]
+    limits = range(step, 100, step)
+    tint = image.copy()
+    for value in limits:
+        x = int(round(value / 100 * width))
+        y = int(round(value / 100 * height))
+        if 0 < x < width:
+            cv2.line(tint, (x, top), (x, height), GRID_COLOR, 1)
+        if 0 < y < height:
+            cv2.line(tint, (0, y), (width, y), GRID_COLOR, 1)
+    image[:] = cv2.addWeighted(tint, GRID_ALPHA, image, 1 - GRID_ALPHA, 0)
+
+    for value in limits:
+        x = int(round(value / 100 * width))
+        y = int(round(value / 100 * height))
+        if 0 < x < width:
+            _grid_label(image, str(value), (max(2, x - 10), max(14, height - 8)))
+        if 0 < y < height:
+            _grid_label(image, str(value), (4, y + 14))
+
+
+def build_grid_snapshot(
+    content: str,
+    *,
+    settings: SnapshotSettings | None = None,
+    cache: SnapshotCache | None = None,
+    now: datetime | None = None,
+    frame_provider=None,
+) -> SnapshotReply:
+    """The live frame plus a 0-100 tick grid, so a coordinate can be read off it.
+
+    The same picture as :func:`build_snapshot` with the grid added, because the two
+    requests are neighbours: one checks where the zones land, this one produces a
+    coordinate to type into a question like "sofa 的 x30 y70 附近谁待过". Camera problems
+    come back as a sentence, exactly as they do there.
+    """
+    settings = settings or snapshot_settings()
+    cameras = configured_cameras()
+    camera = resolve_camera(content, cameras, settings.aliases)
+    if camera is None:
+        if len(cameras) == 1:
+            camera = cameras[0]
+        else:
+            return SnapshotReply(
+                "要哪个相机的参考图？消息里带上名字就行："
+                + describe_cameras(cameras, settings.aliases)
+                + "（例如 `沙发参考图`）。"
+            )
+
+    try:
+        source = current_source(camera)
+    except RuntimeError as error:
+        return SnapshotReply(f"`{camera}` 拿不到 RTSP 地址：{error}")
+    if not source:
+        return SnapshotReply(f"`{camera}` 还没有配置 RTSP 地址，画不了参考图。")
+
+    provider = frame_provider or (cache or default_cache()).frame
+    frame = provider(camera, source)
+    if frame is None:
+        return SnapshotReply(
+            f"`{camera}` 的画面没抓到（等超时了）。相机可能正忙或者不在线，过一会儿再要一次。"
+        )
+
+    calibration = load_calibrations().get(camera)
+    zones = list(calibration.zones) if calibration is not None else []
+    subheader, verdict = alignment_verdict(calibration, frame)
+
+    moment = now or datetime.now()
+    header = (
+        f"{camera} reference {moment.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"  grid={settings.grid_step} zones={len(zones)}"
+    )
+    image = render_overlay(_resize_for_display(frame, settings.max_width), zones, header, subheader)
+    draw_grid(image, settings.grid_step, top=HEADER_HEIGHT)
+    image_path = _write_jpeg(image, settings.jpeg_quality)
+    if image_path is None:
+        return SnapshotReply(f"`{camera}` 的画面抓到了，但存成图片失败，再看一眼日志。")
+
+    lines = [
+        f"📐 `{camera}` 的坐标参考图（{moment.strftime('%H:%M:%S')}）",
+        (
+            f"刻度每 {settings.grid_step} 一格；横轴 x 向右、纵轴 y 向下，都是 0-100"
+            "（图的四条边就是 0 和 100）。"
+        ),
+    ]
+    if zones:
+        lines.append(
+            f"区域 {len(zones)} 个，按参考帧坐标画在图上：网格和区域对不上，就是这台相机要调了。"
+        )
+    else:
+        lines.append("这个相机还没有画过区域，图上只有画面和网格。")
+    lines.append(
+        "读到坐标后这样问本鱼：`x30 y70 附近谁待过`——别忘了带相机名，"
+        "同一组数字在别的相机上是另一个地方。"
+    )
     lines.append(verdict)
     return SnapshotReply("\n".join(lines), image_path)
 

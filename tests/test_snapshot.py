@@ -545,3 +545,69 @@ def test_a_frame_that_never_arrives_leaves_no_image(monkeypatch) -> None:
     )
     assert reply.image_path is None
     assert "没抓到" in reply.caption
+
+
+# --- the coordinate reference picture --------------------------------------
+#
+# "沙发参考图": the live frame plus a 0-100 tick grid. The scale is the one the
+# questions speak, so the number read off a line is the number that can be typed back
+# into "sofa 的 x30 y70 附近谁待过".
+
+
+def test_the_grid_is_drawn_on_the_0_100_scale() -> None:
+    frame = synthetic_frame(width=200, height=100)
+    before = frame.copy()
+    snapshot.draw_grid(frame, 10)
+
+    # Value 50 lands on the middle of the frame; a cell interior is left alone.
+    assert not np.array_equal(frame[5, 100], before[5, 100])
+    assert np.array_equal(frame[5, 90], before[5, 90])
+    assert not np.array_equal(frame[50, 150], before[50, 150])
+    assert np.array_equal(frame[45, 150], before[45, 150])
+
+
+def test_the_grid_step_is_configurable() -> None:
+    frame = synthetic_frame(width=200, height=100)
+    before = frame.copy()
+    snapshot.draw_grid(frame, 40)
+
+    # 40 and 80 are lines at step 40; 50 is not, so a 10-grid is not being drawn.
+    assert not np.array_equal(frame[5, 160], before[5, 160])
+    assert np.array_equal(frame[5, 100], before[5, 100])
+
+
+def test_the_grid_defaults_are_usable_without_a_config_block() -> None:
+    configured = snapshot_settings({})
+    assert configured.grid_triggers == snapshot.DEFAULT_GRID_TRIGGERS
+    assert configured.grid_step == snapshot.DEFAULT_GRID_STEP
+
+
+def test_the_grid_block_is_read_from_the_config(monkeypatch) -> None:
+    monkeypatch.setattr(snapshot, "SNAPSHOT_CONFIG", {"grid_triggers": ["喵刻度"], "grid_step": 25})
+    configured = snapshot.snapshot_settings()
+    assert configured.grid_triggers == ("喵刻度",)
+    assert configured.grid_step == 25
+
+
+def test_a_reference_request_returns_a_frame_with_a_caption(monkeypatch) -> None:
+    monkeypatch.setattr(snapshot, "current_source", lambda name: "rtsp://x")
+    reply = snapshot.build_grid_snapshot(
+        "沙发参考图",
+        settings=settings(),
+        frame_provider=lambda name, source: synthetic_frame(320, 180),
+    )
+    assert reply.image_path is not None
+    assert "sofa" in reply.caption
+    # The owner has to be told what the numbers mean and how to use them.
+    assert "刻度" in reply.caption and "x30 y70" in reply.caption
+    assert cv2.imread(str(reply.image_path)) is not None
+    reply.image_path.unlink()
+
+
+def test_a_reference_request_without_a_camera_asks_which_one(monkeypatch) -> None:
+    monkeypatch.setattr(snapshot, "current_source", lambda name: "rtsp://x")
+    reply = snapshot.build_grid_snapshot(
+        "参考图", settings=settings(), frame_provider=lambda name, source: synthetic_frame()
+    )
+    assert reply.image_path is None
+    assert "哪个相机" in reply.caption
