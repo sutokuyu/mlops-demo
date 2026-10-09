@@ -684,3 +684,109 @@ def test_the_point_tool_is_registered_and_dispatchable(tmp_path: Path) -> None:
     )
     assert reply["ok"] is True
     assert reply["result"]["camera"] == "living_room"
+
+
+# --- how long, and which day -----------------------------------------------
+#
+# Measured 2026-10-10: "10月8号，有哪只猫在sofa的x30，y70附近停留过超过5秒钟？" was not a
+# question the bot could answer at all. "x30，y70" - a label with no "=" - did not parse
+# as a coordinate, so nothing was counted, so answer_question() returned None and the
+# message fell back to the daily report, for TODAY: the date was only ever read by the
+# query path for the query's own range.
+
+
+def observations_near_a_point(database: Path, day: date = date(2026, 10, 3)) -> Path:
+    """Three samples 5s apart by kurumi, one sighting by bagel, both on sofa."""
+    store = LocationStore(database)
+    base = day_start(day)
+    for offset in (60, 65, 70):
+        store.record_observation(
+            base + offset,
+            "kurumi",
+            "sofa",
+            None,
+            0.9,
+            camera_point=(0.30, 0.70),
+            frame_size=(1600, 900),
+        )
+    store.record_observation(
+        base + 3600,
+        "bagel",
+        "sofa",
+        None,
+        0.9,
+        camera_point=(0.31, 0.71),
+        frame_size=(1600, 900),
+    )
+    store.close()
+    return database
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sofa的x30，y70附近谁待过",
+        "sofa x30 y70 附近谁待过",
+        "sofa x=30 y=70 附近谁待过",
+        "sofa x:30, y:70 附近谁待过",
+    ],
+)
+def test_a_coordinate_may_be_written_without_a_separator(text: str) -> None:
+    point = queries.parse_point(text)
+    assert point is not None
+    assert (point["x"], point["y"], point["unit"]) == (30.0, 70.0, "percent")
+
+
+def test_two_bare_numbers_are_still_not_a_coordinate() -> None:
+    """The x/y label is what makes it a coordinate; guessing would be worse."""
+    assert queries.parse_point("sofa 30,70 谁待过") is None
+
+
+def test_a_minimum_duration_is_read_from_the_question() -> None:
+    assert queries.parse_duration("超过5秒钟") == 5.0
+    assert queries.parse_duration("停留超过5秒") == 5.0
+    assert queries.parse_duration("至少2分钟") == 120.0
+    assert queries.parse_duration("待够30秒") == 30.0
+    # A bare number after 超过 is as likely to be a count as a duration, so a missing
+    # unit means no threshold at all.
+    assert queries.parse_duration("超过5次") is None
+    assert queries.parse_duration("今天谁去过猫砂盆") is None
+
+
+def test_a_date_written_out_loud_is_read_without_breaking_on_other_numbers() -> None:
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=TZ)
+    assert queries.explicit_day("10月8号猫都干啥了", now=now) == date(2026, 10, 8)
+    assert queries.explicit_day("2026-10-08 的报告", now=now) == date(2026, 10, 8)
+    # 30-70 has the shape of a month and a day, and building that date would raise.
+    assert queries.explicit_day("sofa 30-70 附近", now=now) is None
+    assert queries.parse_range("sofa 30-70 附近", now=now)[2] == "2026-10-10"
+    assert queries.explicit_day("今天怎么样了", now=now) is None
+
+
+def test_a_minimum_duration_drops_the_stays_that_were_too_short(tmp_path: Path) -> None:
+    """A single sighting is 0 seconds long, so it cannot demonstrate a 5-second stay."""
+    database = observations_near_a_point(tmp_path / "history.db")
+    result = queries.point_stay(
+        camera="sofa", x=30, y=70, since="2026-10-03", database=database, min_seconds=5, now=NOW
+    )
+    assert [stay["cat"] for stay in result["stays"]] == ["kurumi"]
+    assert result["stays"][0]["seconds"] == 10.0
+    assert result["minutes_by_cat"] == {"kurumi": 0.2}
+    # Nothing vanishes silently: what was too short is counted and reported.
+    assert result["min_seconds"] == 5.0
+    assert result["dropped_below_min_seconds"] == 1
+
+
+def test_the_question_the_owner_asked_is_answered_from_the_data(tmp_path: Path) -> None:
+    database = observations_near_a_point(tmp_path / "history.db", day=date(2026, 10, 8))
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=TZ)
+    verdict = queries.answer_question(
+        "10月8号，有哪只猫在sofa的x30，y70附近停留过超过5秒钟？", database=database, now=now
+    )
+    assert verdict is not None
+    assert verdict["tool"] == "point_stay"
+    assert verdict["camera"] == "sofa"
+    assert verdict["range"]["label"] == "2026-10-08"
+    assert verdict["found"] is True
+    assert verdict["min_seconds"] == 5.0
+    assert [stay["cat"] for stay in verdict["stays"]] == ["kurumi"]

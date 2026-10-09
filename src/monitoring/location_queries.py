@@ -166,6 +166,36 @@ def date_span(
     return start_ts, end_ts, label
 
 
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    """A calendar date, or ``None`` when the numbers are not one.
+
+    The regexes are loose enough to catch a coordinate: ``30-70`` matches the month/day
+    shape, and building ``date(year, 30, 70)`` raises. A question must not be lost - or
+    worse, crash the caller - because its text happened to contain two numbers.
+    """
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+
+
+def explicit_day(text: str, *, now: datetime | None = None) -> date | None:
+    """The one calendar day a message names outright, or ``None``.
+
+    "10月8号", "10/8", "2026-10-08" pin a single day. "昨天" and ranges ("最近3天",
+    "这周") deliberately do not count here - they are not a single date and the range
+    logic already handles them. This exists because the report day used to come only
+    from 昨天/前天, so "10月8号猫都干啥了" was answered with TODAY's report.
+    """
+    iso = _ISO_DATE.search(text)
+    if iso:
+        return _safe_date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+    month_day = _MONTH_DAY.search(text)
+    if month_day:
+        return _safe_date(_now_local(now).year, int(month_day.group(1)), int(month_day.group(2)))
+    return None
+
+
 def _parse_date(value: str | date | None, tz: ZoneInfo) -> date | None:
     if value in (None, ""):
         return None
@@ -175,13 +205,13 @@ def _parse_date(value: str | date | None, tz: ZoneInfo) -> date | None:
         return value
     text = str(value).strip()
     if text.isdigit() and len(text) == 8:  # YYYYMMDD
-        return date(int(text[:4]), int(text[4:6]), int(text[6:]))
+        return _safe_date(int(text[:4]), int(text[4:6]), int(text[6:]))
     match = _ISO_DATE.search(text)
     if match:
-        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        return _safe_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     match = _MONTH_DAY.search(text)
     if match:
-        return date(_now_local().year, int(match.group(1)), int(match.group(2)))
+        return _safe_date(_now_local().year, int(match.group(1)), int(match.group(2)))
     raise ValueError(f"could not read a date from {value!r}; use YYYY-MM-DD")
 
 
@@ -220,15 +250,15 @@ def parse_range(
     if any(word in lowered for word in _THIS_MONTH_WORDS):
         return _span(today.replace(day=1), today, tz)
 
-    iso_dates = _ISO_DATE.findall(text)
+    iso_dates = [_safe_date(int(y), int(m), int(d)) for y, m, d in _ISO_DATE.findall(text)]
+    iso_dates = [value for value in iso_dates if value is not None]
     if iso_dates:
-        days = [date(int(y), int(m), int(d)) for y, m, d in iso_dates]
-        return _span(min(days), max(days), tz)
+        return _span(min(iso_dates), max(iso_dates), tz)
 
-    month_days = _MONTH_DAY.findall(text)
+    month_days = [_safe_date(today.year, int(m), int(d)) for m, d in _MONTH_DAY.findall(text)]
+    month_days = [value for value in month_days if value is not None]
     if month_days:
-        days = [date(today.year, int(m), int(d)) for m, d in month_days]
-        return _span(min(days), max(days), tz)
+        return _span(min(month_days), max(month_days), tz)
 
     if any(marker in lowered for marker in EVER_MARKERS):
         start_ts, _ = day_bounds(today - timedelta(days=ALL_HISTORY_DAYS), tz)
@@ -284,12 +314,17 @@ def stay_rows(
     *,
     database: Path | None = None,
     max_stays: int | None = None,
+    min_seconds: float | None = None,
 ) -> dict:
     """The core count, over every visit in the range - not over the returned sample.
 
     ``count`` and ``total_minutes`` always describe the whole range; ``stays`` may be
     truncated to ``max_stays`` and says so, because a model that is handed 20 rows and
     told "the count is 137" must not read 20 as the answer.
+
+    ``min_seconds`` drops stays shorter than that, for a question that asks for them
+    (""停留过超过5秒""). A visit's duration is real here - it was opened and closed
+    across samples - so unlike a point stay there is nothing to estimate.
     """
     wanted = {str(zone) for zone in zones}
     if not wanted:
@@ -306,7 +341,9 @@ def stay_rows(
     matched = [
         visit
         for visit in sorted(visits, key=lambda item: item.start_ts)
-        if visit.zone in wanted and (cat is None or visit.cat == cat)
+        if visit.zone in wanted
+        and (cat is None or visit.cat == cat)
+        and (min_seconds is None or (visit.end_ts - visit.start_ts) >= float(min_seconds))
     ]
     stays = [
         {
@@ -325,7 +362,7 @@ def stay_rows(
     for visit in matched:
         counts_by_cat[visit.cat] = counts_by_cat.get(visit.cat, 0) + 1
         counts_by_zone[visit.zone] = counts_by_zone.get(visit.zone, 0) + 1
-    return {
+    result = {
         "zones": sorted(wanted),
         "cat": cat or "all",
         "count": len(matched),
@@ -342,6 +379,9 @@ def stay_rows(
         "truncated": len(matched) > len(stays),
         "max_stays": limit,
     }
+    if min_seconds is not None:
+        result["min_seconds"] = float(min_seconds)
+    return result
 
 
 def zone_stay(
@@ -352,12 +392,19 @@ def zone_stay(
     until: str | None = None,
     database: Path | None = None,
     max_stays: int | None = None,
+    min_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """How often and how long a cat stayed in the given zones, with exact times."""
     start_ts, end_ts, label = date_span(since, until, now=now)
     result = stay_rows(
-        start_ts, end_ts, _as_list(zones), cat or None, database=database, max_stays=max_stays
+        start_ts,
+        end_ts,
+        _as_list(zones),
+        cat or None,
+        database=database,
+        max_stays=max_stays,
+        min_seconds=min_seconds,
     )
     result["range"] = _range_payload(start_ts, end_ts, label)
     return result
@@ -432,12 +479,14 @@ def _frame_size(rows: Iterable) -> tuple[int, int] | None:
 
 def _finish_point_stay(camera: str, cat: str, first: float, last: float, samples: int) -> dict:
     tz = report_timezone()
+    span = max(0.0, last - first)
     return {
         "cat": cat,
         "camera": camera,
         "start": _format_time(first, tz),
         "end": _format_time(last, tz),
-        "minutes": round(max(0.0, last - first) / 60, 1),
+        "seconds": round(span, 1),
+        "minutes": round(span / 60, 1),
         "samples": samples,
     }
 
@@ -454,6 +503,7 @@ def point_stay_between(
     cat: str | None = None,
     database: Path | None = None,
     max_stays: int | None = None,
+    min_seconds: float | None = None,
 ) -> dict:
     """Who stayed near a point on one camera, over an explicit range.
 
@@ -463,6 +513,12 @@ def point_stay_between(
     only while consecutive samples stay inside ``radius`` and no more than
     ``point_gap_seconds`` apart; everything else is someone walking through, and sorting
     the result by minutes is what separates the two.
+
+    ``min_seconds`` is the ""超过5秒钟"" part of a question: it keeps only stays whose
+    first and last detection are at least that far apart. A single detection has a
+    0-second span - nothing between the two ends to measure - so it cannot demonstrate a
+    duration, and the ones dropped are counted in ``dropped_below_min_seconds`` rather
+    than vanishing.
     """
     limits = query_limits()
     if not camera:
@@ -532,9 +588,7 @@ def point_stay_between(
     gap = limits["point_gap_seconds"]
     limit = limits["max_stays"] if max_stays is None else int(max_stays)
     stays: list[dict] = []
-    samples_by_cat: dict[str, int] = {}
     for cat_name, cat_rows in matched.items():
-        samples_by_cat[cat_name] = len(cat_rows)
         current: dict | None = None
         for row in cat_rows:  # observations_between orders by ts
             if current is not None and row.ts - current["last"] <= gap:
@@ -556,8 +610,19 @@ def point_stay_between(
             )
 
     stays.sort(key=lambda item: (-item["minutes"], item["cat"], item["start"]))
+    dropped = 0
+    if min_seconds is not None:
+        threshold = float(min_seconds)
+        kept = [stay for stay in stays if stay["seconds"] >= threshold]
+        dropped = len(stays) - len(kept)
+        stays = kept
+
+    # Counted over the stays that are being reported, so the sample counts and the
+    # answer cannot disagree once a duration threshold has dropped some.
+    samples_by_cat: dict[str, int] = {}
     minutes_by_cat: dict[str, float] = {}
     for stay in stays:
+        samples_by_cat[stay["cat"]] = samples_by_cat.get(stay["cat"], 0) + stay["samples"]
         minutes_by_cat[stay["cat"]] = round(
             minutes_by_cat.get(stay["cat"], 0.0) + stay["minutes"], 1
         )
@@ -586,6 +651,9 @@ def point_stay_between(
         "total_samples": sum(samples_by_cat.values()),
         "total_minutes": round(sum(minutes_by_cat.values()), 1),
     }
+    if min_seconds is not None:
+        answer["min_seconds"] = float(min_seconds)
+        answer["dropped_below_min_seconds"] = dropped
     return answer
 
 
@@ -601,6 +669,7 @@ def point_stay(
     until: str | None = None,
     database: Path | None = None,
     max_stays: int | None = None,
+    min_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Which cat stayed near a point on one camera, and for how long.
@@ -621,6 +690,7 @@ def point_stay(
         cat=cat,
         database=database,
         max_stays=max_stays,
+        min_seconds=min_seconds,
     )
     result["range"] = _range_payload(start_ts, end_ts, label)
     return result
@@ -680,6 +750,13 @@ TOOLS: dict[str, Tool] = {
                 "cat": {"type": "string", "description": "Limit to one cat; omit for both."},
                 "since": _DATE_ARGUMENT,
                 "until": _DATE_ARGUMENT,
+                "min_seconds": {
+                    "type": "number",
+                    "description": (
+                        "Only count stays at least this many seconds long. Use it when the "
+                        "owner says 超过5秒 / 至少2分钟."
+                    ),
+                },
             },
             "required": ["zones"],
         },
@@ -750,6 +827,14 @@ TOOLS: dict[str, Tool] = {
                 "cat": {"type": "string", "description": "Limit to one cat; omit for both."},
                 "since": _DATE_ARGUMENT,
                 "until": _DATE_ARGUMENT,
+                "min_seconds": {
+                    "type": "number",
+                    "description": (
+                        "Only count stays at least this many seconds long (the span between "
+                        "the first and last detection). Use it when the owner says "
+                        "超过5秒 / 至少2分钟; a single detection is 0 seconds long."
+                    ),
+                },
             },
             "required": ["camera", "x", "y"],
         },
@@ -787,16 +872,39 @@ def call_tool(
 
 
 # A point the owner names, in the few forms that are unambiguous enough to trust:
-# "x=1200 y=800", "坐标 1200 800", "(1200, 800)". Dates ("2026-10-03") do not match any
-# of these, which is why the bare two-number form needs the 坐标 marker.
+# "x=1200 y=800", "x30 y70", "坐标 1200 800", "(1200, 800)". Dates ("2026-10-03") do
+# not match any of these, which is why the bare two-number form needs the 坐标 marker.
+#
+# The `x`/`y` label is required: "sofa 30,70" stays unparsed rather than being guessed
+# at, because two bare numbers are as likely to be a date, a duration or a sentence.
+# The ``=``/``:`` after the label is optional because the owner wrote "x30，y70" - a
+# label immediately followed by its number is the most natural way to type it.
 _POINT_XY = re.compile(
-    r"x\s*[=:：]\s*(-?\d+(?:\.\d+)?)[^\d\-]+y\s*[=:：]\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
+    r"x\s*[=:：]?\s*(-?\d+(?:\.\d+)?)[^\d\-]+y\s*[=:：]?\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _POINT_COORD = re.compile(
     r"坐标\s*(?:是|为|在|[:：=])?\s*(-?\d+(?:\.\d+)?)[,，\s]+(-?\d+(?:\.\d+)?)"
 )
 _POINT_PAREN = re.compile(r"[（(]\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*[)）]")
 _POINT_RADIUS = re.compile(r"半径\s*[:=：]?\s*(\d+(?:\.\d+)?)")
+
+# "停留超过5秒钟" / "待够2分钟" - a floor on how long a stay has to last to count. The
+# unit is required: a bare number after 超过 is as likely to be a count as a duration.
+_DURATION_UNITS = {"小时": 3600.0, "分钟": 60.0, "分": 60.0, "秒钟": 1.0, "秒": 1.0}
+_DURATION = re.compile(r"(?:超过|至少|大于|不少于|够)\s*(\d+(?:\.\d+)?)\s*(小时|分钟|秒钟|秒|分)")
+
+
+def parse_duration(text: str) -> float | None:
+    """The minimum stay the question asks for, in seconds, or ``None``.
+
+    "超过5秒钟", "至少2分钟", "待够30秒". Kept separate from the point/zone parsers because
+    it is a property of the question, not of a place - the same phrase has to be able to
+    narrow a stay on a zone or near a point.
+    """
+    match = _DURATION.search(text)
+    if match is None:
+        return None
+    return float(match.group(1)) * _DURATION_UNITS[match.group(2)]
 
 
 def parse_point(text: str) -> dict | None:
@@ -846,6 +954,9 @@ def answer_question(
     start_ts, end_ts, label = parse_range(content, now=now)
     cats = resolve_cats(content)
     cat = cats[0] if len(cats) == 1 else None
+    # "超过5秒钟" narrows a stay wherever the question points, so it is read once here
+    # and handed to whichever tool runs.
+    min_seconds = parse_duration(content)
 
     point = parse_point(content)
     if point is not None:
@@ -875,6 +986,7 @@ def answer_question(
             cat=cat,
             database=database,
             max_stays=max_stays,
+            min_seconds=min_seconds,
         )
         answer.update(result)
         if cat is None and len(cats) > 1:
@@ -885,7 +997,15 @@ def answer_question(
     if not zones:
         return None
 
-    result = stay_rows(start_ts, end_ts, zones, cat, database=database, max_stays=max_stays)
+    result = stay_rows(
+        start_ts,
+        end_ts,
+        zones,
+        cat,
+        database=database,
+        max_stays=max_stays,
+        min_seconds=min_seconds,
+    )
     result["tool"] = "zone_stay"
     result["question"] = content.strip()[:200]
     result["range"] = _range_payload(start_ts, end_ts, label)
