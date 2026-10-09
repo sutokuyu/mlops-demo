@@ -945,6 +945,14 @@ def test_the_query_block_only_appears_with_a_computed_answer() -> None:
     assert instruction.rstrip().endswith(GROUNDING_RULES)
 
 
+def test_the_query_block_forbids_calling_a_missing_camera_an_absence() -> None:
+    """Measured 2026-10-10: asked "10月8号，x35y75附近谁待过" with no camera named, the
+    reply said "数据里就是没有" AND asked which camera - reporting an absence that had
+    not been looked up.
+    """
+    assert "Never report that case as an absence" in QUERY
+
+
 def test_the_query_block_forbids_explaining_a_zero_away() -> None:
     """The observed failure was not only a miss but a manufactured pass-by."""
     instruction = build_instruction("zh", query={"count": 0})

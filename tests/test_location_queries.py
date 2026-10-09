@@ -742,6 +742,36 @@ def test_two_bare_numbers_are_still_not_a_coordinate() -> None:
     assert queries.parse_point("sofa 30,70 谁待过") is None
 
 
+def test_a_coordinate_can_be_written_with_no_gap_at_all() -> None:
+    """The owner typed "x35y75" - no space, no comma - and it has to be the same point.
+
+    A `+` in the gap matched the `y` label itself and then demanded another one, so the
+    message parsed as no coordinate at all: no query was computed, the reply stopped
+    being a focused answer, and the model improvised "数据里没有坐标信息" on top of the
+    full-day report.
+    """
+    for text in ("x35y75", "sofa x35y75", "10月8号，x35y75附近谁待过"):
+        assert queries.parse_point(text) == {
+            "x": 35.0,
+            "y": 75.0,
+            "unit": "percent",
+            "radius": None,
+        }, text
+
+
+def test_the_owners_coordinate_message_without_a_camera_asks_which_one(tmp_path: Path) -> None:
+    """The exact message that came back as "查不到" plus a recap of the whole day."""
+    database = observations_near_a_point(tmp_path / "history.db", day=date(2026, 10, 8))
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=TZ)
+    verdict = queries.answer_question("10月8号，x35y75附近谁待过", database=database, now=now)
+    assert verdict is not None, "a parsed coordinate must not fall back to the daily report"
+    assert verdict["tool"] == "point_stay"
+    assert verdict["needs_camera"] is True
+    assert (verdict["point"]["x"], verdict["point"]["y"]) == (35.0, 75.0)
+    assert verdict["range"]["label"] == "2026-10-08"
+    assert "sofa" in verdict["camera_candidates"]
+
+
 def test_a_minimum_duration_is_read_from_the_question() -> None:
     assert queries.parse_duration("超过5秒钟") == 5.0
     assert queries.parse_duration("停留超过5秒") == 5.0

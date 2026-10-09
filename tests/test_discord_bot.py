@@ -1163,6 +1163,30 @@ def test_a_request_for_the_day_keeps_the_full_report() -> None:
         assert not needs_focused_answer(content, None), content
 
 
+def test_a_coordinate_without_a_camera_is_still_a_focused_question() -> None:
+    """It has to ask which camera, not fall back to the day and then recap it."""
+    verdict = {
+        "tool": "point_stay",
+        "needs_camera": True,
+        "found": False,
+        "point": {"x": 0.35, "y": 0.75, "unit": "normalized"},
+    }
+    assert needs_focused_answer("10月8号，x35y75附近谁待过", verdict)
+
+
+def test_the_owners_coordinate_message_is_sent_as_one_question(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    focused_call(monkeypatch, captured)
+
+    build_reply(
+        "10月8号，x35y75附近谁待过",
+        settings=settings(),
+        database=database_with_a_visit(tmp_path),
+    )
+
+    assert captured["focus"] is True
+
+
 def focused_call(monkeypatch, captured: dict) -> None:
     def fake_call_llm(summary, temperature=None, question=None, query=None, focus=False):
         captured["summary"] = summary

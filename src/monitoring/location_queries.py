@@ -872,15 +872,20 @@ def call_tool(
 
 
 # A point the owner names, in the few forms that are unambiguous enough to trust:
-# "x=1200 y=800", "x30 y70", "坐标 1200 800", "(1200, 800)". Dates ("2026-10-03") do
-# not match any of these, which is why the bare two-number form needs the 坐标 marker.
+# "x=1200 y=800", "x30 y70", "x35y75", "坐标 1200 800", "(1200, 800)". Dates
+# ("2026-10-03") do not match any of these, which is why the bare two-number form needs
+# the 坐标 marker.
 #
 # The `x`/`y` label is required: "sofa 30,70" stays unparsed rather than being guessed
 # at, because two bare numbers are as likely to be a date, a duration or a sentence.
-# The ``=``/``:`` after the label is optional because the owner wrote "x30，y70" - a
-# label immediately followed by its number is the most natural way to type it.
+# The separator after a label is optional AND the gap between the two numbers may be
+# empty - the owner wrote "x35y75" - so the gap is `*` and not `+`. With `+` the gap
+# swallowed the `y` label itself ("x35y75" -> the gap ate the "y", then a literal "y"
+# was still required) and the whole message parsed as no coordinate at all. Lazy
+# backtracking is what makes the empty gap work: greedy tries "y", fails, and gives it
+# back.
 _POINT_XY = re.compile(
-    r"x\s*[=:：]?\s*(-?\d+(?:\.\d+)?)[^\d\-]+y\s*[=:：]?\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
+    r"x\s*[=:：]?\s*(-?\d+(?:\.\d+)?)[^\d\-]*y\s*[=:：]?\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _POINT_COORD = re.compile(
     r"坐标\s*(?:是|为|在|[:：=])?\s*(-?\d+(?:\.\d+)?)[,，\s]+(-?\d+(?:\.\d+)?)"
