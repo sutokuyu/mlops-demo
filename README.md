@@ -560,7 +560,7 @@ one camera vocabulary to maintain. When a coordinate is given without a camera t
 asks which one rather than guessing.
 
 The `x`/`y` label is what makes a pair of numbers a coordinate, and the separator is
-optional, so `sofa的x30，y70附近` and `sofa x=30 y=70` both work. "sofa 30,70" does not
+optional, so `sofa的x35y75附近谁待过` and `sofa x=35 y=75` both work. "sofa 30,70" does not
 - two bare numbers are as likely to be a date or a duration, and guessing would be
 worse than falling back to the report. A floor on the length of a stay is read from the
 question too: `超过5秒钟` / `至少2分钟` becomes `min_seconds`, and each stay reports its
@@ -568,6 +568,18 @@ question too: `超过5秒钟` / `至少2分钟` becomes `min_seconds`, and each 
 `dropped_below_min_seconds` can say that shorter sightings existed instead of letting
 them read as nothing. One caveat worth knowing: a stay seen only once is 0 seconds long,
 so it cannot demonstrate a duration and a threshold drops it.
+
+A point a few units off must not turn a real stay into "no record". Measured
+2026-10-10: the owner asked about sofa `(35, 75)` and bagel had been there for 25
+seconds, but its nearest sample was 141px from the point against a 128px radius - so
+the whole stay was filtered out and the answer was a silent absence. The radius is
+still `report.query.point_radius`, but the same clustering now runs a second time over
+`point_fallback_radius` (15% of the frame width) and anything that fell *entirely*
+outside the radius comes back as `nearby`, each entry carrying `distance_percent` -
+how far outside, in the units the owner typed. The prompt requires the model to report
+those as "close by, about N units away" rather than as a hit, and never to call the
+question empty while `nearby` has rows. Passing `半径10` widens the match for one
+question instead.
 
 The answer comes with a **live frame with the spot circled** (orange circle + crosshair,
 plus the radius it matched with), so an owner who meant a different place can see that

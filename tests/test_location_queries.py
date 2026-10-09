@@ -39,6 +39,9 @@ from src.monitoring.zone_vocabulary import (
 
 TZ = ZoneInfo("Asia/Tokyo")
 NOW = datetime(2026, 10, 3, 12, 0, tzinfo=TZ)
+# A clock after the 10-08 records these tests seed: date_span() clamps the end of a range
+# to "today", so asking about 10-08 as seen from 10-03 would close the range to nothing.
+LATER = datetime(2026, 10, 10, 12, 0, tzinfo=TZ)
 
 
 def day_start(day: date) -> float:
@@ -770,6 +773,123 @@ def test_the_owners_coordinate_message_without_a_camera_asks_which_one(tmp_path:
     assert (verdict["point"]["x"], verdict["point"]["y"]) == (35.0, 75.0)
     assert verdict["range"]["label"] == "2026-10-08"
     assert "sofa" in verdict["camera_candidates"]
+
+
+# --- a point a few units off must not read as "nothing there" ---------------
+#
+# Measured 2026-10-08: the owner asked about sofa (35,75) because bagel had been sick
+# there around 13:50. bagel WAS there - six samples from 13:50:22 to 13:50:47, a
+# 25-second stay - but its nearest sample sat 141px from the point against a 128px
+# radius (5% of a 2560px frame). The whole stay was filtered out, so the answer was a
+# silent "no record".
+
+FRAME = (2560, 1440)
+
+
+def a_stay_at(
+    database: Path,
+    day: date,
+    cat: str,
+    anchor: tuple[float, float],
+    *,
+    minute: int,
+    second: int,
+    samples: int = 6,
+    step: float = 5.0,
+) -> Path:
+    """``samples`` observations ``step`` seconds apart at one anchor, on one camera."""
+    store = LocationStore(database)
+    base = day_start(day) + minute * 60 + second
+    for index in range(samples):
+        store.record_observation(
+            base + index * step,
+            cat,
+            "sofa",
+            None,
+            0.9,
+            camera_point=anchor,
+            frame_size=FRAME,
+        )
+    store.close()
+    return database
+
+
+def test_a_stay_just_outside_the_radius_is_reported_as_nearby(tmp_path: Path) -> None:
+    """The 5px miss that made a 25-second stay invisible."""
+    database = a_stay_at(
+        tmp_path / "history.db",
+        date(2026, 10, 8),
+        "bagel",
+        (0.405, 0.747),
+        minute=13 * 60 + 50,
+        second=22,
+    )
+    result = queries.point_stay(
+        camera="sofa", x=35, y=75, since="2026-10-08", database=database, now=LATER
+    )
+
+    assert result["found"] is False
+    assert result["stays"] == []
+    assert len(result["nearby"]) == 1
+    near = result["nearby"][0]
+    assert near["cat"] == "bagel"
+    assert near["seconds"] == 25.0
+    assert near["samples"] == 6
+    # 141px on a 2560px frame, in the same 0-100 units the owner typed.
+    assert near["distance_percent"] == pytest.approx(5.5, abs=0.1)
+
+
+def test_the_same_stay_is_a_direct_hit_at_the_spot_the_cat_was(tmp_path: Path) -> None:
+    """(40,80) is where the anchor actually was, so the radius catches it."""
+    database = a_stay_at(
+        tmp_path / "history.db",
+        date(2026, 10, 8),
+        "bagel",
+        (0.405, 0.747),
+        minute=13 * 60 + 50,
+        second=22,
+    )
+    result = queries.point_stay(
+        camera="sofa", x=40, y=80, since="2026-10-08", database=database, now=LATER
+    )
+    assert result["found"] is True
+    assert [stay["cat"] for stay in result["stays"]] == ["bagel"]
+    assert result["stays"][0]["seconds"] == 25.0
+    assert result["nearby"] == []
+
+
+def test_nothing_is_listed_as_nearby_when_everything_matched(tmp_path: Path) -> None:
+    database = a_stay_at(
+        tmp_path / "history.db",
+        date(2026, 10, 8),
+        "kurumi",
+        (0.36, 0.75),
+        minute=11 * 60 + 19,
+        second=27,
+    )
+    result = queries.point_stay(
+        camera="sofa", x=35, y=75, since="2026-10-08", database=database, now=LATER
+    )
+    assert result["found"] is True
+    assert result["nearby"] == []
+
+
+def test_a_stay_far_from_the_point_is_not_listed_at_all(tmp_path: Path) -> None:
+    """The fallback is a neighbourhood, not the whole frame."""
+    database = a_stay_at(
+        tmp_path / "history.db",
+        date(2026, 10, 8),
+        "bagel",
+        (0.90, 0.20),
+        minute=13 * 60 + 50,
+        second=22,
+    )
+    result = queries.point_stay(
+        camera="sofa", x=35, y=75, since="2026-10-08", database=database, now=LATER
+    )
+    assert result["found"] is False
+    assert result["stays"] == []
+    assert result["nearby"] == []
 
 
 def test_a_minimum_duration_is_read_from_the_question() -> None:

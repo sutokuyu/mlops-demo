@@ -49,6 +49,14 @@ DEFAULT_TOP_ZONES = 10
 # gap of a minute splits one visit from the next.
 DEFAULT_POINT_RADIUS = 0.05
 DEFAULT_POINT_GAP_SECONDS = 60.0
+# A stay that lands just OUTSIDE the radius is still an answer to "who was around here".
+# Measured 2026-10-10: the owner asked about sofa (35,75) and bagel had been 141px from
+# a 128px radius for 25 seconds - the reply was a silent "no record", because a 5px
+# miss is indistinguishable from nothing once the rows are filtered. So the same
+# clustering runs again over this wider area and whatever fell entirely outside the
+# radius is reported as `nearby`, carrying how far outside in the units the owner types.
+DEFAULT_POINT_FALLBACK_RADIUS = 0.15
+DEFAULT_NEARBY_MAX = 3
 
 # See discord_bot.DAY_BEFORE_YESTERDAY_WORDS / YESTERDAY_WORDS: the same phrases, kept
 # here so a question's range and its report day cannot drift apart (a test compares them).
@@ -84,6 +92,10 @@ def query_limits() -> dict:
         "max_stays": int(raw.get("max_stays", DEFAULT_MAX_STAYS)),
         "top_zones": int(raw.get("top_zones", DEFAULT_TOP_ZONES)),
         "point_radius": float(raw.get("point_radius", DEFAULT_POINT_RADIUS)),
+        "point_fallback_radius": float(
+            raw.get("point_fallback_radius", DEFAULT_POINT_FALLBACK_RADIUS)
+        ),
+        "point_nearby_max": int(raw.get("point_nearby_max", DEFAULT_NEARBY_MAX)),
         "point_gap_seconds": float(raw.get("point_gap_seconds", DEFAULT_POINT_GAP_SECONDS)),
     }
 
@@ -491,6 +503,48 @@ def _finish_point_stay(camera: str, cat: str, first: float, last: float, samples
     }
 
 
+def _cluster_point_stays(camera: str, cat: str, ranked: list[tuple], gap: float) -> list[dict]:
+    """``[(row, distance)]`` for one cat -> stay dicts, each carrying its closest sample.
+
+    Consecutive samples no more than ``gap`` apart are one stay; the closest distance is
+    kept because that is what decides whether the stay was inside the asked radius, and
+    how far outside it was when it was not.
+    """
+    stays: list[dict] = []
+    current: dict | None = None
+    for row, distance in ranked:  # observations_between orders by ts
+        if current is not None and row.ts - current["last"] <= gap:
+            current["last"] = row.ts
+            current["samples"] += 1
+            current["closest"] = min(current["closest"], distance)
+        else:
+            if current is not None:
+                stays.append(
+                    {
+                        **_finish_point_stay(
+                            camera, cat, current["first"], current["last"], current["samples"]
+                        ),
+                        "closest": current["closest"],
+                    }
+                )
+            current = {
+                "first": row.ts,
+                "last": row.ts,
+                "samples": 1,
+                "closest": distance,
+            }
+    if current is not None:
+        stays.append(
+            {
+                **_finish_point_stay(
+                    camera, cat, current["first"], current["last"], current["samples"]
+                ),
+                "closest": current["closest"],
+            }
+        )
+    return stays
+
+
 def point_stay_between(
     start_ts: float,
     end_ts: float,
@@ -575,47 +629,56 @@ def point_stay_between(
         def distance(ax: float, ay: float) -> float:
             return hypot(ax - qx, ay - qy)
 
-    matched: dict[str, list] = {}
-    for row in rows:
-        if cat is not None and row.cat != cat:
-            continue
-        anchor = row.camera_anchor
-        if anchor is None:
-            continue
-        if distance(*anchor) <= threshold:
-            matched.setdefault(row.cat, []).append(row)
+    # Distances are pixels when the frame size is known and already normalized when it is
+    # not, so dividing by the frame width (or by 1) gives the 0-100 units the owner types.
+    unit_scale = float(frame[0]) if frame is not None else 1.0
+    fallback_threshold = limits["point_fallback_radius"] * unit_scale
+
+    def candidates(max_distance: float) -> dict[str, list]:
+        """Rows within ``max_distance``, grouped by cat, each paired with its distance."""
+        grouped: dict[str, list] = {}
+        for row in rows:
+            if cat is not None and row.cat != cat:
+                continue
+            anchor = row.camera_anchor
+            if anchor is None:
+                continue
+            found = distance(*anchor)
+            if found <= max_distance:
+                grouped.setdefault(row.cat, []).append((row, found))
+        return grouped
 
     gap = limits["point_gap_seconds"]
     limit = limits["max_stays"] if max_stays is None else int(max_stays)
     stays: list[dict] = []
-    for cat_name, cat_rows in matched.items():
-        current: dict | None = None
-        for row in cat_rows:  # observations_between orders by ts
-            if current is not None and row.ts - current["last"] <= gap:
-                current["last"] = row.ts
-                current["samples"] += 1
-            else:
-                if current is not None:
-                    stays.append(
-                        _finish_point_stay(
-                            camera, cat_name, current["first"], current["last"], current["samples"]
-                        )
-                    )
-                current = {"first": row.ts, "last": row.ts, "samples": 1}
-        if current is not None:
-            stays.append(
-                _finish_point_stay(
-                    camera, cat_name, current["first"], current["last"], current["samples"]
-                )
-            )
+    for cat_name, ranked in candidates(threshold).items():
+        for stay in _cluster_point_stays(camera, cat_name, ranked, gap):
+            # The distance only means something for a near-miss, so the primary answer
+            # keeps exactly the shape it had.
+            stay.pop("closest")
+            stays.append(stay)
 
     stays.sort(key=lambda item: (-item["minutes"], item["cat"], item["start"]))
+
+    # Near-misses, so a point a few units off cannot turn a real stay into "no record".
+    # A cluster counts as nearby only when EVERY one of its samples was outside the
+    # radius, which is also why it can never duplicate something already in `stays`.
+    nearby: list[dict] = []
+    for cat_name, ranked in candidates(fallback_threshold).items():
+        for stay in _cluster_point_stays(camera, cat_name, ranked, gap):
+            if stay["closest"] > threshold:
+                stay["distance_percent"] = round(stay.pop("closest") / unit_scale * 100, 1)
+                nearby.append(stay)
+    nearby.sort(key=lambda item: (item["distance_percent"], item["cat"]))
+
     dropped = 0
     if min_seconds is not None:
-        threshold = float(min_seconds)
-        kept = [stay for stay in stays if stay["seconds"] >= threshold]
+        threshold_seconds = float(min_seconds)
+        kept = [stay for stay in stays if stay["seconds"] >= threshold_seconds]
         dropped = len(stays) - len(kept)
         stays = kept
+        nearby = [stay for stay in nearby if stay["seconds"] >= threshold_seconds]
+    nearby = nearby[: limits["point_nearby_max"]]
 
     # Counted over the stays that are being reported, so the sample counts and the
     # answer cannot disagree once a duration threshold has dropped some.
@@ -646,6 +709,9 @@ def point_stay_between(
         "stays": stays[: max(0, limit)],
         "truncated": len(stays) > limit,
         "max_stays": limit,
+        # Stays that were only just outside the radius, with how far outside. Empty
+        # whenever everything near the point was already inside it.
+        "nearby": nearby,
         "samples_by_cat": samples_by_cat,
         "minutes_by_cat": minutes_by_cat,
         "total_samples": sum(samples_by_cat.values()),

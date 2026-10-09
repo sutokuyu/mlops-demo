@@ -953,6 +953,13 @@ def test_the_query_block_forbids_calling_a_missing_camera_an_absence() -> None:
     assert "Never report that case as an absence" in QUERY
 
 
+def test_the_query_block_tells_the_model_what_a_nearby_stay_means() -> None:
+    """A stay a few units outside the radius is not a hit, and not an absence either."""
+    assert "`nearby`" in QUERY
+    assert "distance_percent" in QUERY
+    assert "never answer that there is no record" in QUERY
+
+
 def test_the_query_block_forbids_explaining_a_zero_away() -> None:
     """The observed failure was not only a miss but a manufactured pass-by."""
     instruction = build_instruction("zh", query={"count": 0})
