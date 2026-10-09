@@ -960,6 +960,11 @@ def test_the_query_block_tells_the_model_what_a_nearby_stay_means() -> None:
     assert "never answer that there is no record" in QUERY
 
 
+def test_the_query_block_requires_the_closest_nearby_stay() -> None:
+    """Measured: the model listed `stays` and dropped `nearby` entirely, twice."""
+    assert "you MUST name at least the closest" in QUERY
+
+
 def test_the_query_block_forbids_explaining_a_zero_away() -> None:
     """The observed failure was not only a miss but a manufactured pass-by."""
     instruction = build_instruction("zh", query={"count": 0})

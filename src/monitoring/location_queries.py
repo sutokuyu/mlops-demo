@@ -48,7 +48,14 @@ DEFAULT_TOP_ZONES = 10
 # default radius is a fraction of the frame wide enough to cover a cat's body, and a
 # gap of a minute splits one visit from the next.
 DEFAULT_POINT_RADIUS = 0.05
-DEFAULT_POINT_GAP_SECONDS = 60.0
+# The gap that still counts as ONE stay, and therefore what "待过" means. The recorder
+# samples every 5s, so a hole of four samples (20s) is a detection miss while a hole of
+# 60s is twelve misses in a row - the cat left. Measured on 2026-10-08: with 60s bagel's
+# six samples at 13:50:22 and two blips at 13:51:07/13:51:27 merged into one 65-second
+# "stay", so the 25-second event the owner was asking about was reported as a minute-odd
+# blob. At 20s it comes out as exactly 13:50:22-13:50:47 (25s) and the later sightings
+# stand alone.
+DEFAULT_POINT_GAP_SECONDS = 20.0
 # A stay that lands just OUTSIDE the radius is still an answer to "who was around here".
 # Measured 2026-10-10: the owner asked about sofa (35,75) and bagel had been 141px from
 # a 128px radius for 25 seconds - the reply was a silent "no record", because a 5px

@@ -82,6 +82,35 @@ def seed_observations(
     return database
 
 
+def seed_seconds(
+    database: Path,
+    rows: list[tuple[float, str, str, float, float]],
+    *,
+    frame: tuple[int, int] = (2560, 1440),
+    day: date = date(2026, 10, 3),
+) -> Path:
+    """``(second-of-day, cat, camera, x, y)`` -> an observation.
+
+    Seconds rather than minute-of-day because the recorder samples every 5s. The point
+    clusterers merge samples up to ``report.query.point_gap_seconds`` apart, so a test
+    that spaces samples a minute apart is not exercising the clustering the real data
+    hits - and it silently breaks when that gap is retuned.
+    """
+    store = LocationStore(database)
+    for second, cat, camera, x, y in rows:
+        store.record_observation(
+            day_start(day) + second,
+            cat,
+            camera,
+            None,
+            0.9,
+            camera_point=(x, y),
+            frame_size=frame,
+        )
+    store.close()
+    return database
+
+
 SINK_ROWS = [
     (date(2026, 10, 2), 2 * 60, "kurumi", "living_room", "sink", 0.7),
     (date(2026, 10, 2), 13 * 60 + 12, "kurumi", "living_room", "sink", 1.8),
@@ -491,53 +520,80 @@ def test_the_store_migrates_a_database_that_lacks_the_camera_columns(tmp_path: P
 
 
 def test_point_stay_ranks_the_cat_that_stayed_longest(tmp_path: Path) -> None:
-    rows = [
-        (0, "kurumi", "living_room", 0.50, 0.50),
-        (1, "kurumi", "living_room", 0.51, 0.50),
-        (2, "kurumi", "living_room", 0.50, 0.49),
-        (3, "kurumi", "living_room", 0.52, 0.51),
-        (4, "kurumi", "living_room", 0.50, 0.50),
-        (10, "bagel", "living_room", 0.50, 0.50),
-        (11, "bagel", "living_room", 0.49, 0.50),
-    ]
-    database = seed_observations(tmp_path / "history.db", rows)
+    database = seed_seconds(
+        tmp_path / "history.db",
+        [(index * 5.0, "kurumi", "living_room", 0.50, 0.50) for index in range(13)]
+        + [(index * 5.0, "bagel", "living_room", 0.50, 0.50) for index in range(4)],
+    )
     result = queries.point_stay(
         camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
     )
     assert result["found"] is True
-    assert result["minutes_by_cat"] == {"kurumi": 4.0, "bagel": 1.0}
-    assert result["total_minutes"] == pytest.approx(5.0)
+    assert result["minutes_by_cat"] == {"kurumi": 1.0, "bagel": 0.2}
+    assert result["total_minutes"] == pytest.approx(1.2)
     assert result["stays"][0]["cat"] == "kurumi"
-    assert result["stays"][0]["samples"] == 5
+    assert result["stays"][0]["samples"] == 13
 
 
 def test_point_stay_excludes_a_cat_elsewhere_on_the_same_camera(tmp_path: Path) -> None:
-    rows = [
-        (0, "kurumi", "living_room", 0.50, 0.50),
-        (1, "kurumi", "living_room", 0.50, 0.50),
-        (2, "bagel", "living_room", 0.10, 0.10),
-    ]
-    database = seed_observations(tmp_path / "history.db", rows)
+    database = seed_seconds(
+        tmp_path / "history.db",
+        [
+            (0.0, "kurumi", "living_room", 0.50, 0.50),
+            (5.0, "kurumi", "living_room", 0.50, 0.50),
+            (10.0, "bagel", "living_room", 0.10, 0.10),
+        ],
+    )
     result = queries.point_stay(
         camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
     )
-    assert result["minutes_by_cat"] == {"kurumi": 1.0}
+    assert result["minutes_by_cat"] == {"kurumi": 0.1}
     assert "bagel" not in result["samples_by_cat"]
 
 
 def test_a_long_gap_splits_one_cat_into_two_stays(tmp_path: Path) -> None:
-    rows = [
-        (0, "kurumi", "living_room", 0.50, 0.50),
-        (1, "kurumi", "living_room", 0.50, 0.50),
-        (30, "kurumi", "living_room", 0.50, 0.50),
-        (31, "kurumi", "living_room", 0.50, 0.50),
-    ]
-    database = seed_observations(tmp_path / "history.db", rows)
+    database = seed_seconds(
+        tmp_path / "history.db",
+        [
+            (0.0, "kurumi", "living_room", 0.50, 0.50),
+            (5.0, "kurumi", "living_room", 0.50, 0.50),
+            (1800.0, "kurumi", "living_room", 0.50, 0.50),
+            (1805.0, "kurumi", "living_room", 0.50, 0.50),
+        ],
+    )
     result = queries.point_stay(
         camera="living_room", x=0.5, y=0.5, since="2026-10-03", database=database, now=NOW
     )
-    assert [stay["minutes"] for stay in result["stays"]] == [1.0, 1.0]
+    assert [stay["minutes"] for stay in result["stays"]] == [0.1, 0.1]
     assert result["samples_by_cat"] == {"kurumi": 4}
+
+
+def test_a_20_second_hole_is_one_stay_and_a_60_second_hole_is_two(tmp_path: Path) -> None:
+    """Pin what "待过" means, because this gap is the definition.
+
+    Measured on 2026-10-08: at 60s, bagel's six samples at 13:50:22 merged with the two
+    isolated blips at 13:51:07/13:51:27 into one 65-second "stay", drowning the
+    25-second event the owner was asking about. The recorder samples every 5s, so a 20s
+    hole is four missed detections and a 60s hole is twelve - it left.
+    """
+    database = seed_seconds(
+        tmp_path / "history.db",
+        [
+            (0.0, "kurumi", "sofa", 0.35, 0.75),
+            (20.0, "kurumi", "sofa", 0.35, 0.75),
+            (40.0, "kurumi", "sofa", 0.35, 0.75),
+            (100.0, "kurumi", "sofa", 0.35, 0.75),
+            (105.0, "kurumi", "sofa", 0.35, 0.75),
+        ],
+        day=date(2026, 10, 8),
+    )
+    result = queries.point_stay(
+        camera="sofa", x=35, y=75, since="2026-10-08", database=database, now=LATER
+    )
+    assert [(stay["seconds"], stay["samples"]) for stay in result["stays"]] == [
+        (40.0, 3),
+        (5.0, 2),
+    ]
 
 
 def test_point_stay_reads_pixel_coordinates_against_the_frame_size(tmp_path: Path) -> None:
@@ -638,11 +694,11 @@ def test_the_answer_reports_the_point_in_every_scale(tmp_path: Path) -> None:
 
 def test_a_coordinate_question_is_answered_from_the_data(tmp_path: Path) -> None:
     rows = [
-        (0, "kurumi", "living_room", 0.50, 0.50),
-        (1, "kurumi", "living_room", 0.50, 0.50),
-        (2, "bagel", "living_room", 0.50, 0.50),
+        (0.0, "kurumi", "living_room", 0.50, 0.50),
+        (5.0, "kurumi", "living_room", 0.50, 0.50),
+        (10.0, "bagel", "living_room", 0.50, 0.50),
     ]
-    database = seed_observations(tmp_path / "history.db", rows)
+    database = seed_seconds(tmp_path / "history.db", rows)
     verdict = queries.answer_question(
         "客厅地板上 (0.50, 0.50) 哪只猫待得久", database=database, now=NOW
     )
@@ -798,20 +854,12 @@ def a_stay_at(
     step: float = 5.0,
 ) -> Path:
     """``samples`` observations ``step`` seconds apart at one anchor, on one camera."""
-    store = LocationStore(database)
-    base = day_start(day) + minute * 60 + second
-    for index in range(samples):
-        store.record_observation(
-            base + index * step,
-            cat,
-            "sofa",
-            None,
-            0.9,
-            camera_point=anchor,
-            frame_size=FRAME,
-        )
-    store.close()
-    return database
+    base = minute * 60 + second
+    return seed_seconds(
+        database,
+        [(base + index * step, cat, "sofa", anchor[0], anchor[1]) for index in range(samples)],
+        day=day,
+    )
 
 
 def test_a_stay_just_outside_the_radius_is_reported_as_nearby(tmp_path: Path) -> None:

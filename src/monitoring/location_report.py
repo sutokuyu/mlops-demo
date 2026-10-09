@@ -210,7 +210,9 @@ QUERY = (
     "the point. When `stays` is empty but `nearby` is not, never answer that there is no "
     "record - say nothing matched the point exactly, then name the nearby stays, and if "
     "a nearby stay looks like what the owner meant, say the point is a few units off and "
-    "suggest re-asking with a larger 半径."
+    "suggest re-asking with a larger 半径. If `nearby` is not empty, you MUST name at "
+    "least the closest entry, with its cat, times and distance - a reply that lists only "
+    "`stays` while `nearby` has rows is incomplete."
 )
 
 # Deliberately not configurable. Models happily invent a plausible day when a
