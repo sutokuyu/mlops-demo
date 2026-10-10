@@ -80,7 +80,8 @@ tracking:
   repositioned_at:
     # sofa 相机 2026-10-11 00:30 被搬到了新位置并重新画了 zone。
     sofa: "2026-10-11T00:30:00+09:00"
-    # living_room 也在 00:34 重画过 —— 如果那台相机本身也被挪动了，这里同样要填。
+    # living_room 同一天也动过区域（只改了几个点位），但相机本身没挪，所以不填它——
+    # 填了会把本来可比的旧数据误排除。
   confidence_threshold: 0.3
   imgsz: 640
   # Inference device, shared by the tracker, realtime_view and the browser preview.
