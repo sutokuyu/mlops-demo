@@ -71,6 +71,16 @@ preview:
 
 tracking:
   sample_interval_seconds: 5.0
+  # 相机被物理挪动过之后，之前记录的坐标就属于另一个画面了：同一个 x/y 指的是
+  # 完全不同的位置。点查询（"sofa 的 x30 y70 附近谁待过"）只比对 cam_x/cam_y，
+  # 所以必须知道从哪个时刻起这台相机的坐标能和当前画面相比。填了之后，更早的
+  # 样本会被排除，并在结果里如实报出丢了多少条（excluded_before_reposition），
+  # 而不是把两个画面的坐标混在一起编出一个答案。没填 = 这台相机从没挪过。
+  # 注意：只是重画区域、或原地重锚定（相机没动）都不要写进这里。
+  repositioned_at:
+    # sofa 相机 2026-10-11 00:30 被搬到了新位置并重新画了 zone。
+    sofa: "2026-10-11T00:30:00+09:00"
+    # living_room 也在 00:34 重画过 —— 如果那台相机本身也被挪动了，这里同样要填。
   confidence_threshold: 0.3
   imgsz: 640
   # Inference device, shared by the tracker, realtime_view and the browser preview.
@@ -208,7 +218,7 @@ report:
     wet_food_bowl_2: [湿粮碗2]
     water_server: [饮水机, 水碗, 水盆]
     bay_window: [飘窗, 窗台]
-    kitchen_counter: [厨房台面, 料理台, 灶台]
+    kitchen_counter: [料理台, 灶台]
     stove: [炉子, 灶]
     on_dining_table: [餐桌上, 餐桌, 桌上]
     under_dining_table: [餐桌底下, 桌下]
@@ -216,12 +226,15 @@ report:
     on_tv: [电视上, 电视]
     on_white_chair: [白色椅子, 白椅子]
     near_living_room_curtain: [窗帘]
-    carpet: [地毯]
-    carpet_(in_front_of_sofa): [沙发前地毯]
+    # 挪动 sofa 相机后重画的区域：地毯 -> on_carpet，边柜 -> near_side_shelf。
+    # 旧名字（carpet / carpet_(in_front_of_sofa) / near_side_cabinet / on_side_cabinet）
+    # 现在没有任何相机在用，留着只会让「地毯」这类问法静默解析成空，测试也会拦。
+    # 注意：旧的 `carpet` 和 `carpet_(in_front_of_sofa)` 现在是同一块 on_carpet，
+    # 如果新画面里其实是两个不同的地方，告诉我拆开。
+    on_carpet: [地毯, 沙发前地毯]
+    near_side_shelf: [边柜, 边柜上, 边柜旁]
     on_sofa: [沙发上, 沙发]
     under_sofa: [沙发底下]
-    on_side_cabinet: [边柜上]
-    near_side_cabinet: [边柜]
     on_kangaroo_chair: [袋鼠椅上]
     under_kangaroo_chair: [袋鼠椅底下]
     floor: [地板, 地上]
@@ -233,6 +246,9 @@ report:
   zone_groups:
     湿粮碗: [wet_food_bowl_1, wet_food_bowl_2]
     饭碗: [wet_food_bowl_1, wet_food_bowl_2]
+    # 同一块厨房台面被两台相机各自命名：living_room 叫 kitchen_counter，
+    # 搬过去的 sofa 相机看它是 on_kitchen_counter。所以「厨房台面」要同时指这两个。
+    厨房台面: [kitchen_counter, on_kitchen_counter]
   # 代码算出来的查询结果，作为事实交给模型引用（而不是让它从时间线里数）。
   query:
     # 一次回答最多带回多少条停留记录

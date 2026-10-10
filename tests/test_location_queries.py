@@ -42,6 +42,21 @@ NOW = datetime(2026, 10, 3, 12, 0, tzinfo=TZ)
 # A clock after the 10-08 records these tests seed: date_span() clamps the end of a range
 # to "today", so asking about 10-08 as seen from 10-03 would close the range to nothing.
 LATER = datetime(2026, 10, 10, 12, 0, tzinfo=TZ)
+# And one after the sofa camera was moved (2026-10-11 00:30), for the same reason: a
+# range ending on 10-11 is unreachable from a clock on 10-10.
+AFTER_MOVE = datetime(2026, 10, 12, 12, 0, tzinfo=TZ)
+
+
+@pytest.fixture(autouse=True)
+def no_camera_repositions(monkeypatch) -> None:
+    """Forget the real 2026-10-11 sofa move unless a test is about it.
+
+    `locations.yaml` records that moment so that production never compares coordinates
+    from two different camera positions. Most tests here seed historical sofa data and
+    ask about the clustering or the radius, which is a different question - they call
+    repositioned() when they do mean to exercise the exclusion.
+    """
+    monkeypatch.setitem(queries.TRACKING_CONFIG, "repositioned_at", {})
 
 
 def day_start(day: date) -> float:
@@ -193,6 +208,24 @@ def test_no_word_is_claimed_by_two_zones() -> None:
     """A shared word would silently answer about the wrong zone."""
     assert ambiguous_words(zone_aliases()) == {}
     assert ambiguous_words(DEFAULT_ZONE_ALIASES) == {}
+
+
+def test_the_configured_vocabulary_only_names_zones_that_exist() -> None:
+    """The config is the LIVE vocabulary, so it needs the same guard as the defaults.
+
+    Found by the 2026-10-11 sofa camera move: the redraw renamed four zones and the
+    config kept pointing `地毯` / `边柜` at names no camera has, which makes the
+    question resolve to nothing without saying why.
+    """
+    existing = set(known_zones())
+    configured = zone_aliases()
+    missing = {zone for zone in configured if zone not in existing}
+    assert missing == set(), (
+        f"locations.yaml aliases point at zones no camera has: {sorted(missing)}"
+    )
+    for word, zones in zone_groups().items():
+        for zone in zones:
+            assert zone in existing, f"zone_groups.{word} names a zone no camera has: {zone}"
 
 
 def test_every_default_alias_names_a_zone_that_exists_on_some_camera() -> None:
@@ -938,6 +971,69 @@ def test_a_stay_far_from_the_point_is_not_listed_at_all(tmp_path: Path) -> None:
     assert result["found"] is False
     assert result["stays"] == []
     assert result["nearby"] == []
+
+
+# --- a moved camera makes the coordinates recorded before it invalid ----------------
+#
+# The sofa camera was physically relocated on 2026-10-11 00:30. Before that moment
+# (0.35, 0.75) is a different physical place, so matching those rows against a coordinate
+# read off the new picture would invent a story about a spot nobody was ever near.
+
+
+def repositioned(monkeypatch, camera: str, moment: str) -> None:
+    monkeypatch.setitem(queries.TRACKING_CONFIG, "repositioned_at", {camera: moment})
+
+
+def test_rows_from_before_the_camera_moved_are_excluded_and_counted(
+    monkeypatch, tmp_path: Path
+) -> None:
+    database = seed_seconds(
+        tmp_path / "history.db",
+        [(0.0, "bagel", "sofa", 0.35, 0.75), (5.0, "bagel", "sofa", 0.35, 0.75)],
+        day=date(2026, 10, 10),
+    )
+    seed_seconds(
+        database,
+        [(0.0, "kurumi", "sofa", 0.35, 0.75), (5.0, "kurumi", "sofa", 0.35, 0.75)],
+        day=date(2026, 10, 11),
+    )
+    repositioned(monkeypatch, "sofa", "2026-10-11T00:00:00+09:00")
+
+    result = queries.point_stay(
+        camera="sofa",
+        x=35,
+        y=75,
+        since="2026-10-10",
+        until="2026-10-11",
+        database=database,
+        now=AFTER_MOVE,
+    )
+
+    assert [stay["cat"] for stay in result["stays"]] == ["kurumi"]
+    assert result["excluded_before_reposition"] == 2
+
+
+def test_a_camera_that_never_moved_keeps_every_row(monkeypatch, tmp_path: Path) -> None:
+    database = a_stay_at(
+        tmp_path / "history.db",
+        date(2026, 10, 8),
+        "bagel",
+        (0.35, 0.75),
+        minute=13 * 60 + 50,
+        second=22,
+    )
+    repositioned(monkeypatch, "sofa", "2026-09-01T00:00:00+09:00")
+    result = queries.point_stay(
+        camera="sofa", x=35, y=75, since="2026-10-08", database=database, now=LATER
+    )
+    assert result["stays"][0]["cat"] == "bagel"
+    assert result["excluded_before_reposition"] == 0
+
+
+def test_an_unreadable_reposition_time_is_an_error_not_a_silent_skip(monkeypatch) -> None:
+    repositioned(monkeypatch, "sofa", "last tuesday")
+    with pytest.raises(ValueError, match="ISO timestamp"):
+        queries.camera_repositioned_at("sofa")
 
 
 def test_a_minimum_duration_is_read_from_the_question() -> None:

@@ -29,7 +29,7 @@ TARGET_DAY = "2026-09-19"
 # feeder / water_server. Per report.llm.hints, two or more appearances within 5
 # minutes with nothing else in between means a real toilet visit.
 BAGEL = [
-    ("00:12", "05:40", "sofa", "carpet", 65),
+    ("00:12", "05:40", "sofa", "on_carpet", 65),
     # PASS-BY (1/2): on the way to breakfast. Paired with the return trip below,
     # 45 minutes later and separated by `feeder`, so this must NOT count as a
     # toilet visit on either count.
@@ -45,7 +45,7 @@ BAGEL = [
     ("12:10", "13:00", "feeder", "water_server", 10),
     ("13:05", "16:20", "sofa", "on_kangaroo_chair", 39),
     ("16:25", "17:10", "living_room", "on_tv", 9),
-    ("17:15", "18:40", "living_room", "table_top", 17),
+    ("17:15", "18:40", "living_room", "on_dining_table", 17),
     ("18:45", "19:30", "feeder", "feeder", 9),
     ("19:35", "22:50", "sofa", "on_sofa", 39),
     ("22:55", "23:55", "sofa", "under_sofa", 12),
@@ -54,17 +54,17 @@ BAGEL = [
 KURUMI = [
     ("00:05", "06:10", "living_room", "cat_wall", 73),
     ("06:15", "07:00", "feeder", "feeder", 9),
-    ("07:05", "09:30", "living_room", "curtain", 29),
-    ("09:35", "11:00", "sofa", "near_side_cabinet", 17),
-    ("11:05", "12:30", "sofa", "on_side_cabinet", 17),
+    ("07:05", "09:30", "living_room", "near_living_room_curtain", 29),
+    ("09:35", "11:00", "sofa", "near_side_shelf", 17),
+    ("11:05", "12:30", "sofa", "on_kitchen_counter", 17),
     # PASS-BY on the way to the water server: a single appearance, so never a use.
     ("12:33:40", "12:33:55", "feeder", "toilet_1", 1),
     ("12:35", "13:20", "feeder", "water_server", 9),
-    ("13:25", "15:00", "living_room", "under_table", 19),
+    ("13:25", "15:00", "living_room", "under_dining_table", 19),
     ("15:05", "17:40", "sofa", "on_sofa", 31),
     ("17:45", "18:20", "living_room", "floor", 7),
     ("18:25", "19:10", "feeder", "feeder", 9),
-    ("19:15", "21:00", "sofa", "carpet", 21),
+    ("19:15", "21:00", "sofa", "on_carpet", 21),
     ("21:05", "22:30", "living_room", "on_white_chair", 17),
     ("22:35", "23:50", "sofa", "under_kangaroo_chair", 15),
 ]

@@ -275,7 +275,7 @@ def best_observation_per_cat(observations: list[Observation]) -> dict[str, Obser
 
 
 def describe_location(camera: str, zone: str | None) -> str:
-    """``sofa/carpet``, or ``feeder/unknown`` when no zone matched.
+    """``sofa/on_carpet``, or ``feeder/unknown`` when no zone matched.
 
     The camera belongs in the string. A cat crossing feeder -> sofa -> living room
     reports the same zone name (``floor``) three times, so a zone-only label made a

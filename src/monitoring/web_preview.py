@@ -511,12 +511,15 @@ INDEX_HTML = """<!doctype html>
     <input id="zone-name" list="zone-names" placeholder="区域名称，例如 floor" autocomplete="off">
     <datalist id="zone-names">
       <option value="floor"></option>
-      <option value="table_top"></option>
-      <option value="under_table"></option>
-      <option value="sofa_cushion"></option>
+      <option value="on_dining_table"></option>
+      <option value="under_dining_table"></option>
+      <option value="on_sofa"></option>
       <option value="under_sofa"></option>
-      <option value="counter_top"></option>
-      <option value="carpet"></option>
+      <option value="on_carpet"></option>
+      <option value="near_side_shelf"></option>
+      <option value="on_kitchen_counter"></option>
+      <option value="cat_wall"></option>
+      <option value="sink"></option>
     </datalist>
     <div class="toolbar">
       <button id="close-poly" class="primary">闭合多边形</button>

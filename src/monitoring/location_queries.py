@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 from src.monitoring.location_config import (
     IDENTITY_CLASSES,
     REPORT_CONFIG,
+    TRACKING_CONFIG,
     configured_cameras,
     location_database,
 )
@@ -110,6 +111,33 @@ def query_limits() -> dict:
 def _now_local(now: datetime | None = None) -> datetime:
     tz = report_timezone()
     return now.astimezone(tz) if now is not None else datetime.now(tz)
+
+
+def camera_repositioned_at(camera: str) -> float | None:
+    """When this camera was last physically moved, as an epoch, or ``None``.
+
+    A point query compares the stored camera-frame anchor against a coordinate the owner
+    read off the CURRENT picture. Those are only comparable if the camera has not moved
+    in between: after a move the same x/y is a different physical place, so matching old
+    rows would invent a story about a spot nobody was ever near. ``tracking.repositioned_at``
+    records the moment, per camera; a camera that was only redrawn or re-anchored in
+    place must NOT be listed there, because nothing became incomparable in that case.
+    """
+    raw = (TRACKING_CONFIG.get("repositioned_at") or {}).get(camera)
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        moment = raw
+    else:
+        try:
+            moment = datetime.fromisoformat(str(raw))
+        except ValueError as error:
+            raise ValueError(
+                f"tracking.repositioned_at.{camera} is not an ISO timestamp: {raw!r}"
+            ) from error
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=report_timezone())
+    return moment.timestamp()
 
 
 def known_cats() -> list[str]:
@@ -605,6 +633,16 @@ def point_stay_between(
     finally:
         store.close()
 
+    # Rows from before the camera was physically moved hold coordinates of a different
+    # view, so they are dropped rather than matched - and counted, so the reply can say
+    # the range is not empty rather than presenting it as "nobody was there".
+    repositioned = camera_repositioned_at(camera)
+    excluded_reposition = 0
+    if repositioned is not None:
+        kept = [row for row in rows if row.ts >= repositioned]
+        excluded_reposition = len(rows) - len(kept)
+        rows = kept
+
     frame = _frame_size(rows)
     # ``radius`` is given in the caller's unit, but the default is a fraction of the frame
     # (points are stored 0..1), so the default is not divided by 100 or by the frame.
@@ -727,6 +765,8 @@ def point_stay_between(
     if min_seconds is not None:
         answer["min_seconds"] = float(min_seconds)
         answer["dropped_below_min_seconds"] = dropped
+    if repositioned is not None:
+        answer["excluded_before_reposition"] = excluded_reposition
     return answer
 
 

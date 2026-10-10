@@ -41,7 +41,7 @@ DEFAULT_ZONE_ALIASES: dict[str, list[str]] = {
     "wet_food_bowl_2": ["湿粮碗2"],
     "water_server": ["饮水机", "水碗", "水盆"],
     "bay_window": ["飘窗", "窗台"],
-    "kitchen_counter": ["厨房台面", "料理台", "灶台"],
+    "kitchen_counter": ["料理台", "灶台"],
     "stove": ["炉子", "灶", "炉灶"],
     "on_dining_table": ["餐桌上", "餐桌", "桌上", "餐桌顶部", "餐桌顶上", "餐桌上面"],
     "under_dining_table": ["餐桌底下", "桌下", "餐桌底部", "桌底", "餐桌下方", "餐桌下面"],
@@ -49,12 +49,14 @@ DEFAULT_ZONE_ALIASES: dict[str, list[str]] = {
     "on_tv": ["电视上", "电视"],
     "on_white_chair": ["白色椅子", "白椅子", "白色椅子上", "白椅子上"],
     "near_living_room_curtain": ["窗帘", "窗帘旁", "窗帘附近", "窗帘周围", "窗帘旁边"],
-    "carpet": ["地毯", "地毯上"],
-    "carpet_(in_front_of_sofa)": ["沙发前地毯"],
+    # Renames from the 2026-10-11 sofa camera move: the old `carpet` /
+    # `carpet_(in_front_of_sofa)` are one `on_carpet` now, and the old
+    # `near_side_cabinet` / `on_side_cabinet` are `near_side_shelf`. A zone name no
+    # camera has makes the owner's word resolve to nothing, silently.
+    "on_carpet": ["地毯", "地毯上", "沙发前地毯"],
     "on_sofa": ["沙发上", "沙发", "沙发顶部", "沙发顶上", "沙发上面"],
     "under_sofa": ["沙发底下", "沙发底部", "沙发底", "沙发下方"],
-    "on_side_cabinet": ["边柜上", "边柜顶部", "边柜顶上", "边柜上面"],
-    "near_side_cabinet": ["边柜旁", "边柜附近", "边柜周围", "边柜旁边"],
+    "near_side_shelf": ["边柜", "边柜旁", "边柜附近", "边柜周围", "边柜上", "边柜顶上"],
     "on_kangaroo_chair": ["袋鼠椅上"],
     "under_kangaroo_chair": ["袋鼠椅底下"],
     "floor": ["地板", "地上"],
@@ -68,6 +70,9 @@ DEFAULT_ZONE_ALIASES: dict[str, list[str]] = {
 DEFAULT_ZONE_GROUPS: dict[str, list[str]] = {
     "湿粮碗": ["wet_food_bowl_1", "wet_food_bowl_2"],
     "饭碗": ["wet_food_bowl_1", "wet_food_bowl_2"],
+    # One kitchen counter, two cameras: living_room names it kitchen_counter and the
+    # relocated sofa camera sees it as on_kitchen_counter.
+    "厨房台面": ["kitchen_counter", "on_kitchen_counter"],
 }
 
 

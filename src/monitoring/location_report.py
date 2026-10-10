@@ -212,7 +212,11 @@ QUERY = (
     "a nearby stay looks like what the owner meant, say the point is a few units off and "
     "suggest re-asking with a larger 半径. If `nearby` is not empty, you MUST name at "
     "least the closest entry, with its cat, times and distance - a reply that lists only "
-    "`stays` while `nearby` has rows is incomplete."
+    "`stays` while `nearby` has rows is incomplete. `excluded_before_reposition` counts "
+    "sightings dropped because the camera was physically moved at some point in the "
+    "range: their coordinates point at different places on the current picture. When it "
+    "is above 0, say that the camera was moved and that only the time since then is "
+    "comparable - never report the range as simply empty."
 )
 
 # Deliberately not configurable. Models happily invent a plausible day when a
