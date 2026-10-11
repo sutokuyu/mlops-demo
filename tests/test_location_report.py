@@ -351,6 +351,48 @@ def test_a_focused_question_replaces_the_task_and_drops_the_timeline(monkeypatch
     assert body["cats"][0]["events"] == [{"kind": "meal", "minutes": 3.0}]
 
 
+def test_a_focused_question_still_carries_the_last_sighting(tmp_path: Path, monkeypatch) -> None:
+    """The last sighting is what a focused answer cannot take from `locations`.
+
+    The exact message that was answered "数据里没有时间": it names a cat, so it is a
+    focused question, and what the model got held nothing but zones and minutes.
+    """
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    visit_id = store.open_visit(start_ts + 3600, "bagel", "living_room", "on_dining_table", 0.9)
+    store.touch_visit(visit_id, start_ts + 3660, 4, 0.9)
+    store.close()
+
+    captured = {}
+
+    def fake_post(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return json.dumps({"choices": [{"message": {"content": "喵"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(location_report, "_post", fake_post)
+    monkeypatch.setitem(
+        location_report.REPORT_CONFIG,
+        "llm",
+        {**location_report.REPORT_CONFIG["llm"], "api_key": "test-key"},
+    )
+
+    call_llm(build_summary(day, database), question="最后一次看到bagel在哪", focus=True)
+
+    body = json.loads(captured["body"]["messages"][1]["content"])
+    assert "timeline" not in body["cats"][0]
+    assert body["cats"][0]["last_seen"] == {
+        "time": "01:01:00",
+        "location": "on_dining_table",
+        "camera": "living_room",
+    }
+    assert "last_seen" in captured["body"]["messages"][0]["content"], (
+        "the field is useless to the model unless the prompt says what it means"
+    )
+
+
 def test_the_daily_report_keeps_the_task_and_the_timeline(monkeypatch) -> None:
     """The cron report has no question, so it must be untouched by FOCUS."""
     captured = {}
@@ -444,6 +486,50 @@ def test_build_summary_reads_the_requested_database(tmp_path: Path) -> None:
     empty = tmp_path / "empty.db"
     LocationStore(empty).close()
     assert build_summary(day, empty)["cats"] == []
+
+
+def test_the_summary_says_when_and_where_a_cat_was_last_seen(tmp_path: Path) -> None:
+    """The final sighting is a fact of the summary, not the last `timeline` row.
+
+    Measured 2026-10-12: asked "最后一次看到bagel在哪" the bot answered that the data held
+    no time. The question names a cat, so it is answered as a focused question, and a
+    focused payload is the day with `timeline` removed - while `locations` carries
+    minutes and no times at all. Nothing in that payload said when the cat was last seen.
+    """
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    early = store.open_visit(start_ts + 60, "bagel", "living_room", "on_sofa", 0.9)
+    store.touch_visit(early, start_ts + 120, 3, 0.9)
+    late = store.open_visit(start_ts + 3600, "bagel", "living_room", "on_dining_table", 0.9)
+    store.touch_visit(late, start_ts + 3660, 4, 0.9)
+    store.close()
+
+    bagel = build_summary(day, database)["cats"][0]
+    assert bagel["last_seen"] == {
+        "time": "01:01:00",
+        "location": "on_dining_table",
+        "camera": "living_room",
+    }
+    assert len(bagel["timeline"]) == 2, "the fact must be separate from the timeline"
+
+
+def test_a_cat_with_no_stay_has_no_last_sighting(tmp_path: Path) -> None:
+    """A cat the day only knows as a stray appearance has no sighting to report."""
+    day = date(2026, 9, 19)
+    start_ts, _ = day_bounds(day, ZoneInfo("Asia/Tokyo"))
+
+    database = tmp_path / "history.db"
+    store = LocationStore(database)
+    # Inside the configured toilet region, and a single sample never opens a visit.
+    store.record_observation(start_ts + 600, "kurumi", "feeder", "floor", 0.8, 0.5, 0.9)
+    store.close()
+
+    kurumi = build_summary(day, database)["cats"][0]
+    assert kurumi["last_seen"] is None
+    assert kurumi["timeline"] == []
 
 
 def test_build_summary_clips_visits_that_span_midnight(tmp_path: Path) -> None:
@@ -741,6 +827,12 @@ def test_the_meal_verdict_keeps_the_feeding_rows_in_the_timeline(
     assert [event["kind"] for event in bagel["events"]] == ["toilet_use", "meal"]
     assert "feeder" in [entry["zone"] for entry in bagel["timeline"]]
     assert "toilet_1" not in [entry["zone"] for entry in bagel["timeline"]]
+
+
+def test_the_prompt_says_what_the_last_sighting_means() -> None:
+    """A field the prompt never names is a field the model will not use."""
+    assert "last_seen" in EVENTS
+    assert "last_seen" in TASK
 
 
 def test_the_prompt_says_what_the_meal_verdict_means() -> None:

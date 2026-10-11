@@ -895,8 +895,9 @@ TOOLS: dict[str, Tool] = {
     "daily_summary": Tool(
         name="daily_summary",
         description=(
-            "The daily report's own summary for one day: minutes per zone per cat plus the "
-            "code-computed meal, drinking and toilet verdicts."
+            "The daily report's own summary for one day: minutes per zone per cat, the "
+            "cat's final sighting, plus the code-computed meal, drinking and toilet "
+            "verdicts."
         ),
         parameters={
             "type": "object",

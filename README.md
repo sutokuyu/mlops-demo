@@ -410,7 +410,10 @@ it cannot go stale when a trigger word or a camera is renamed. Bot accounts are 
   reply uses `FOCUS` instead of the day's `TASK` and ships the summary with the per-cat
   `timeline` removed - the timeline is nearly all of the payload and is what the model
   recapped from. Measured 2026-10-10: "bagel 今天吃饭没" answered the meal and then
-  reviewed the whole day. A request for the day ("汇报一下今天情况") is unchanged.
+  reviewed the whole day. The timeline was also the only place in the payload a time
+  appeared in, so the day's final sighting is decided in code and shipped as `last_seen`:
+  measured 2026-10-12, "最后一次看到bagel在哪" came back as "数据里没有时间". A request for
+  the day ("汇报一下今天情况") is unchanged.
 - `allowed_channel_ids` / `allowed_user_ids` restrict who can spend an LLM call.
   Empty means *no restriction*, so set them.
 - Two fallbacks keep the bot from going silent: if the data cannot be read it

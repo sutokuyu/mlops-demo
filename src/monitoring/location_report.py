@@ -96,7 +96,7 @@ TASK = (
     "Report what each cat did today: how long it stayed in each location, which location "
     "it preferred, and any notable routine or movement. Meals and water always matter: "
     "say whether the cat ate and drank, using the verdicts in `events`. Add the exact "
-    "time of the cat's final appearance."
+    "time of the cat's final appearance, from `last_seen`."
 )
 
 # The toilet rules used to live in `hints` and the model had to apply them by
@@ -120,7 +120,11 @@ EVENTS = (
     "walking past, and the camera cannot tell which. Report all of them with their "
     "times, stating the confirmed ones plainly and the brief ones as uncertain. A cat "
     "with no `meal` entry did not eat today. Raw `toilet_1` sightings are excluded "
-    "from `locations` and `timeline`."
+    "from `locations` and `timeline`. `last_seen` is the cat's final sighting of the "
+    "day: `time` is when it was last detected and `location` where. Answer where and "
+    "when the cat was last seen from it, not from the timeline - a focused answer is "
+    "sent without one. A cat with no `last_seen` had no recorded stay that day, so say "
+    "that rather than guess a time."
 )
 
 # Its own block because it needs to be unambiguous: folding "write in zh" into TASK
@@ -514,6 +518,24 @@ def toilet_region_events(
     return events
 
 
+def _last_seen_payload(seen: tuple[float, str, str] | None, tz: ZoneInfo) -> dict | None:
+    """When and where the cat was last detected, or ``None`` if it was not seen.
+
+    Code-decided rather than left to the model: a max over a timeline is exactly the
+    kind of arithmetic that gets read wrong, and the timeline is not even in the payload
+    for a focused question. It follows the same filtered stays as ``locations`` and
+    ``timeline``, so the three cannot disagree about what counts as being in a place.
+    """
+    if seen is None:
+        return None
+    moment, location, camera = seen
+    return {
+        "time": datetime.fromtimestamp(moment, tz).strftime("%H:%M:%S"),
+        "location": location,
+        "camera": camera,
+    }
+
+
 def build_summary(day: date_type, database: Path | None = None) -> dict:
     tz = ZoneInfo(REPORT_CONFIG["timezone"])
     start_ts, end_ts = day_bounds(day, tz)
@@ -552,6 +574,10 @@ def build_summary(day: date_type, database: Path | None = None) -> dict:
 
     totals: dict[str, dict[str, float]] = {}
     timeline: dict[str, list[dict]] = {}
+    # The final sighting of the day, kept as a fact of its own. It cannot be read off
+    # `timeline`, because a focused answer is sent with the timeline removed - and
+    # without it a question like "最后一次看到bagel在哪" has no time in the payload at all.
+    last_seen: dict[str, tuple[float, str, str]] = {}
     by_cat: dict[str, list] = {}
     observations_by_cat: dict[str, list] = {}
     for visit in visits:
@@ -573,6 +599,9 @@ def build_summary(day: date_type, database: Path | None = None) -> dict:
         location = visit.location
         cat_totals = totals.setdefault(visit.cat, {})
         cat_totals[location] = cat_totals.get(location, 0.0) + duration
+        seen = last_seen.get(visit.cat)
+        if seen is None or clipped_end > seen[0]:
+            last_seen[visit.cat] = (clipped_end, location, visit.camera)
         timeline.setdefault(visit.cat, []).append(
             {
                 "location": location,
@@ -614,6 +643,7 @@ def build_summary(day: date_type, database: Path | None = None) -> dict:
             {
                 "cat": cat,
                 "events": [*toilet, *meals, *drinks],
+                "last_seen": _last_seen_payload(last_seen.get(cat), tz),
                 "locations": [
                     {"location": location, "minutes": round(seconds / 60, 1)}
                     for location, seconds in sorted(
